@@ -43,69 +43,6 @@
 
 ---
 
-## 🚀 Hướng dẫn cài đặt
-
-### Yêu cầu
-
-- **Node.js** >= 18.x
-- **npm** hoặc **pnpm**
-- Tài khoản **Supabase** (miễn phí)
-
-### 1. Clone dự án
-
-```bash
-git clone <repository-url>
-cd VN_PIT
-```
-
-### 2. Cài đặt dependencies
-
-```bash
-npm install
-```
-
-### 3. Cấu hình biến môi trường
-
-Sao chép file `.env.example` thành `.env.local` và điền thông tin Supabase:
-
-```bash
-cp .env.example .env.local
-```
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-```
-
-> Lấy thông tin từ: **Supabase Dashboard → Project Settings → API**
-
-### 4. Khởi tạo database
-
-Chạy file schema trong **Supabase SQL Editor**:
-
-```bash
-# Mở file này và paste vào Supabase SQL Editor
-supabase/schema.sql
-```
-
-File schema sẽ tạo các bảng:
-- `employees` — Hồ sơ nhân viên
-- `dependents` — Người phụ thuộc
-- `tax_periods` — Kỳ tính thuế
-- `payroll_items` — Chi tiết thuế từng tháng
-
-Và bật **Row Level Security (RLS)** — chỉ người dùng đã đăng nhập mới có quyền truy cập dữ liệu.
-
-### 5. Khởi chạy ứng dụng
-
-```bash
-npm run dev
-```
-
-Truy cập tại: [http://localhost:3000](http://localhost:3000)
-
----
-
 ## 📋 Quy trình sử dụng
 
 ```
@@ -148,25 +85,6 @@ VN_PIT/
 ├── tailwind.config.ts
 └── tsconfig.json
 ```
-
----
-
-## ⚙️ Scripts
-
-| Lệnh | Mô tả |
-|------|-------|
-| `npm run dev` | Khởi chạy môi trường development |
-| `npm run build` | Build production |
-| `npm run start` | Chạy bản build production |
-| `npm run lint` | Kiểm tra linting |
-
----
-
-## 🔒 Bảo mật
-
-- **Row Level Security (RLS)** được bật trên tất cả bảng Supabase — dữ liệu chỉ truy cập được khi đã xác thực.
-- **Middleware** tự động làm mới session và chuyển hướng về trang đăng nhập nếu chưa xác thực.
-- **Biến môi trường** nhạy cảm (Service Role Key) không được đặt với prefix `NEXT_PUBLIC_`.
 
 ---
 
