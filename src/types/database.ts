@@ -6,6 +6,7 @@ export interface Employee {
   tax_code: string | null;
   id_card_number: string | null;
   is_resigned: boolean;
+  is_deleted?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -19,7 +20,7 @@ export interface Dependent {
   tax_code: string | null;
   id_card_number: string | null;
   deduction_from: string; // 'YYYY-MM'
-  deduction_to: string | null; // 'YYYY-MM' or null
+  deduction_to: string;   // 'YYYY-MM' (bắt buộc cả 2 mốc)
   is_inactive: boolean;
   created_at: string;
   updated_at: string;
@@ -35,7 +36,7 @@ export interface TaxPeriod {
 }
 
 export interface TaxBreakdownBracket {
-  bracket: number; // 1 to 7
+  bracket: number; // 1 to 5
   bracketName: string;
   rate: number; // e.g. 0.05
   taxablePortion: number; // Phần TNTT trong bậc này
@@ -62,4 +63,3 @@ export interface PayrollItem {
   created_at: string;
   updated_at: string;
 }
-

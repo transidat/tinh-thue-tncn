@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { Employee, Dependent, PayrollItem, TaxBreakdownBracket } from '@/types/database';
+import { Employee, Dependent, PayrollItem } from '@/types/database';
 import {
   Receipt,
   FileSpreadsheet,
@@ -15,10 +15,8 @@ import {
   Loader2,
   X,
   Eye,
-  Info,
   Calendar,
-  Layers,
-  ArrowRight
+  RefreshCw
 } from 'lucide-react';
 import {
   downloadIncomeTemplate,
@@ -27,28 +25,21 @@ import {
   exportTaxPayrollToExcel
 } from '@/lib/excel-utils';
 import {
-  calculatePIT,
+  calculateFullPIT,
   isDependentValidForPeriod,
-  formatCurrency,
-  PERSONAL_DEDUCTION,
-  DEPENDENT_DEDUCTION
+  formatCurrencyVND,
+  TaxCalculationDetailResult
 } from '@/lib/tax-calculator';
 
-interface CalculatedRow extends IncomeImportRow {
+interface CalculatedPayrollRow extends IncomeImportRow {
   employeeId?: string;
   dependentCount: number;
-  personalDeduction: number;
-  dependentDeduction: number;
-  taxableIncome: number;
-  assessableIncome: number;
-  pitAmount: number;
-  breakdown: TaxBreakdownBracket[];
+  calcResult: TaxCalculationDetailResult;
 }
 
 export default function TaxCalculationPage() {
   const supabase = createClient();
 
-  // Chọn kỳ tính thuế mặc định là tháng hiện tại YYYY-MM
   const [period, setPeriod] = useState<string>(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -56,24 +47,24 @@ export default function TaxCalculationPage() {
 
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // File upload state
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [parsingFile, setParsingFile] = useState(false);
-  const [rawRows, setRawRows] = useState<IncomeImportRow[]>([]);
+  const [rawValidRows, setRawValidRows] = useState<IncomeImportRow[]>([]);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
 
   // Database caches
   const [employeesMap, setEmployeesMap] = useState<Map<string, Employee>>(new Map());
   const [dependentsByEmpCode, setDependentsByEmpCode] = useState<Map<string, Dependent[]>>(new Map());
   const [dbLoading, setDbLoading] = useState(true);
 
-  // Kết quả tính toán
-  const [calculatedItems, setCalculatedItems] = useState<CalculatedRow[]>([]);
+  // Kết quả tính thuế
+  const [calculatedItems, setCalculatedItems] = useState<CalculatedPayrollRow[]>([]);
   const [savingPeriod, setSavingPeriod] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Modal chi tiết bậc tính của 1 nhân viên
-  const [selectedDetailItem, setSelectedDetailItem] = useState<CalculatedRow | null>(null);
+  // Modal giải trình 4 bước
+  const [selectedDetailItem, setSelectedDetailItem] = useState<CalculatedPayrollRow | null>(null);
 
   useEffect(() => {
     if (notification) {
@@ -82,31 +73,35 @@ export default function TaxCalculationPage() {
     }
   }, [notification]);
 
-  // Tải thông tin nhân viên và người phụ thuộc để đối soát
   const loadEmployeesAndDependents = async () => {
     try {
       setDbLoading(true);
 
       const [empRes, depRes] = await Promise.all([
         supabase.from('employees').select('*'),
-        supabase.from('dependents').select('*, employees:employee_id(employee_code)'),
+        supabase.from('dependents').select('*, employees:employee_id(employee_code, is_deleted)'),
       ]);
 
       if (empRes.error) throw empRes.error;
       if (depRes.error) throw depRes.error;
 
+      // Chỉ lấy các nhân viên chưa bị xóa mềm
       const empMap = new Map<string, Employee>();
       (empRes.data || []).forEach((e) => {
-        empMap.set(e.employee_code.toLowerCase().trim(), e);
+        if (!e.is_deleted) {
+          empMap.set(e.employee_code.toLowerCase().trim(), e);
+        }
       });
       setEmployeesMap(empMap);
 
       const depMap = new Map<string, Dependent[]>();
       (depRes.data || []).forEach((d: any) => {
-        const empCode = d.employees?.employee_code?.toLowerCase().trim();
-        if (empCode) {
-          if (!depMap.has(empCode)) depMap.set(empCode, []);
-          depMap.get(empCode)!.push(d);
+        if (!d.employees?.is_deleted) {
+          const empCode = d.employees?.employee_code?.toLowerCase().trim();
+          if (empCode) {
+            if (!depMap.has(empCode)) depMap.set(empCode, []);
+            depMap.get(empCode)!.push(d);
+          }
         }
       });
       setDependentsByEmpCode(depMap);
@@ -121,7 +116,7 @@ export default function TaxCalculationPage() {
     loadEmployeesAndDependents();
   }, []);
 
-  // Xử lý chọn file Excel
+  // Đọc file Excel thu nhập tháng
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -131,44 +126,60 @@ export default function TaxCalculationPage() {
     setParsingFile(true);
 
     try {
-      const rows = await parseIncomeExcel(file);
-      if (rows.length === 0) {
+      const { validRows, errorRows } = await parseIncomeExcel(file);
+      const errorsList: string[] = errorRows.map((er) => `Dòng ${er.rowNumber}: ${er.reason}`);
+
+      // Kiểm tra ràng buộc: Mã NV bắt buộc phải tồn tại trong danh mục nhân viên
+      const finalValidRows: IncomeImportRow[] = [];
+
+      for (const row of validRows) {
+        const emp = employeesMap.get(row.MaNV.toLowerCase().trim());
+        if (!emp) {
+          errorsList.push(`Dòng ${row.rowNumber}: Mã NV "${row.MaNV}" (${row.HoTen}) không tồn tại trong danh mục nhân viên, đã bỏ qua.`);
+        } else {
+          finalValidRows.push(row);
+        }
+      }
+
+      setImportErrors(errorsList);
+      setRawValidRows(finalValidRows);
+
+      if (finalValidRows.length === 0) {
         setNotification({
           type: 'error',
-          message: 'Không tìm thấy dòng dữ liệu hợp lệ trong file Excel. Vui lòng kiểm tra lại cấu trúc cột.',
+          message: 'Không có dòng dữ liệu nào hợp lệ để tính thuế. Vui lòng kiểm tra lại danh sách lỗi bên dưới.',
         });
-        setRawRows([]);
         setCalculatedItems([]);
       } else {
-        setRawRows(rows);
         setNotification({
           type: 'success',
-          message: `Đã đọc thành công ${rows.length} dòng thu nhập từ file Excel. Bấm "Thực hiện tính thuế" để tính toán.`,
+          message: `Đã đọc thành công ${finalValidRows.length} nhân viên hợp lệ từ file Excel!`,
         });
       }
     } catch (err: any) {
       setNotification({ type: 'error', message: 'Lỗi khi đọc file Excel: ' + err.message });
-      setRawRows([]);
+      setRawValidRows([]);
+      setImportErrors([]);
     } finally {
       setParsingFile(false);
     }
   };
 
-  // Động cơ tính thuế theo kỳ được chọn
+  // Tính thuế cho các dòng hợp lệ theo kỳ tháng được chọn
   const handleCalculateTax = () => {
-    if (rawRows.length === 0) {
+    if (rawValidRows.length === 0) {
       setNotification({ type: 'error', message: 'Chưa có dữ liệu thu nhập để tính toán.' });
       return;
     }
 
-    const results: CalculatedRow[] = rawRows.map((row) => {
+    const results: CalculatedPayrollRow[] = rawValidRows.map((row) => {
       const empCodeKey = row.MaNV.toLowerCase().trim();
       const emp = employeesMap.get(empCodeKey);
 
-      // Lấy danh sách NPT của nhân viên này
+      // Tìm người phụ thuộc của nhân viên này
       const allDeps = dependentsByEmpCode.get(empCodeKey) || [];
 
-      // Lọc các NPT hợp lệ trong kỳ tháng này
+      // Lọc các NPT hợp lệ trong tháng kỳ này: Không còn sử dụng = false VÀ deduction_from <= period <= deduction_to
       const validDeps = allDeps.filter((dep) =>
         isDependentValidForPeriod(
           {
@@ -182,10 +193,10 @@ export default function TaxCalculationPage() {
 
       const dependentCount = validDeps.length;
 
-      // Tính thuế theo công thức chuẩn Việt Nam
-      const calc = calculatePIT(
+      // Tính toàn bộ 4 bước theo Biểu 5 bậc mới (Luật 109/2025/QH15)
+      const calcResult = calculateFullPIT(
         row.TongThuNhap,
-        row.KhgChiuThue,
+        row.KhongChiuThue,
         row.BaoHiem,
         dependentCount
       );
@@ -194,12 +205,7 @@ export default function TaxCalculationPage() {
         ...row,
         employeeId: emp?.id,
         dependentCount,
-        personalDeduction: calc.personalDeduction,
-        dependentDeduction: calc.dependentDeduction,
-        taxableIncome: calc.taxableIncome,
-        assessableIncome: calc.assessableIncome,
-        pitAmount: calc.pitAmount,
-        breakdown: calc.calculationBreakdown,
+        calcResult,
       };
     });
 
@@ -207,18 +213,16 @@ export default function TaxCalculationPage() {
     setSaveSuccess(false);
     setNotification({
       type: 'success',
-      message: `Đã tính toán thuế TNCN thành công cho ${results.length} người lao động trong kỳ ${period}!`,
+      message: `Đã tính toán thuế TNCN thành công theo biểu 5 bậc mới cho ${results.length} nhân viên trong kỳ ${period}!`,
     });
   };
 
-  // Tự động tính lại khi người dùng đổi kỳ nếu đã có dữ liệu
   useEffect(() => {
-    if (rawRows.length > 0) {
+    if (rawValidRows.length > 0) {
       handleCalculateTax();
     }
-  }, [period]);
+  }, [period, rawValidRows]);
 
-  // Tổng hợp thống kê kỳ tính thuế
   const summary = useMemo(() => {
     let totalIncome = 0;
     let totalNonTaxable = 0;
@@ -230,12 +234,12 @@ export default function TaxCalculationPage() {
 
     calculatedItems.forEach((item) => {
       totalIncome += item.TongThuNhap;
-      totalNonTaxable += item.KhgChiuThue;
+      totalNonTaxable += item.KhongChiuThue;
       totalInsurance += item.BaoHiem;
-      totalTaxable += item.taxableIncome;
-      totalAssessable += item.assessableIncome;
-      totalTax += item.pitAmount;
-      if (item.pitAmount > 0) employeesWithTax++;
+      totalTaxable += item.calcResult.taxableIncome;
+      totalAssessable += item.calcResult.assessableIncome;
+      totalTax += item.calcResult.finalPitAmount;
+      if (item.calcResult.finalPitAmount > 0) employeesWithTax++;
     });
 
     return {
@@ -250,67 +254,77 @@ export default function TaxCalculationPage() {
     };
   }, [calculatedItems]);
 
-  // Lưu kỳ tính thuế và các dòng vào database
+  // Lưu kỳ tính thuế vào CSDL: Ghi đè sạch sẽ nếu đã có kỳ này
   const handleSaveToDatabase = async () => {
     if (calculatedItems.length === 0) return;
     setSavingPeriod(true);
 
     try {
-      // 1. Tạo hoặc lấy bản ghi tax_periods theo kỳ (period)
-      const { data: existingPeriod } = await supabase
-        .from('tax_periods')
-        .select('id')
-        .eq('period', period)
-        .maybeSingle();
-
-      let periodId = existingPeriod?.id;
-
-      if (!periodId) {
-        const { data: newPeriod, error: periodErr } = await supabase
-          .from('tax_periods')
-          .insert({
-            period,
-            notes: `Tính ngày ${new Date().toLocaleDateString('vi-VN')}`,
-          })
-          .select('id')
-          .single();
-
-        if (periodErr) throw periodErr;
-        periodId = newPeriod.id;
-      }
-
-      // 2. Xóa các payroll_items cũ của kỳ này trước khi chèn mới để đồng bộ hoàn toàn
-      await supabase.from('payroll_items').delete().eq('period_id', periodId);
-
-      // 3. Chuẩn bị dữ liệu chèn payroll_items
-      const insertRows = calculatedItems.map((item) => ({
-        period_id: periodId,
+      // 1. Chuẩn bị mảng bản ghi
+      const payloadItems = calculatedItems.map((item) => ({
         employee_id: item.employeeId || null,
         employee_code: item.MaNV.trim(),
         full_name: item.HoTen.trim(),
         tax_code: item.MaSoThue?.trim() || null,
         total_income: item.TongThuNhap,
-        non_taxable_income: item.KhgChiuThue,
+        non_taxable_income: item.KhongChiuThue,
         insurance: item.BaoHiem,
         dependent_count: item.dependentCount,
-        personal_deduction: item.personalDeduction,
-        dependent_deduction: item.dependentDeduction,
-        taxable_income: item.taxableIncome,
-        assessable_income: item.assessableIncome,
-        pit_amount: item.pitAmount,
-        calculation_breakdown: item.breakdown,
+        personal_deduction: item.calcResult.personalDeduction,
+        dependent_deduction: item.calcResult.dependentDeduction,
+        taxable_income: item.calcResult.taxableIncome,
+        assessable_income: item.calcResult.assessableIncome,
+        pit_amount: item.calcResult.finalPitAmount,
+        calculation_breakdown: item.calcResult.breakdown,
       }));
 
-      const { error: insertErr } = await supabase
-        .from('payroll_items')
-        .insert(insertRows);
+      // 2. Thử gọi RPC transaction an toàn trước
+      const rpcResult = await supabase.rpc('save_monthly_tax_payroll', {
+        p_period: period,
+        p_notes: `Tính ngày ${new Date().toLocaleDateString('vi-VN')}`,
+        p_items: payloadItems,
+      });
 
-      if (insertErr) throw insertErr;
+      if (rpcResult.error) {
+        // Fallback: Nếu hàm RPC chưa được cài đặt trong CSDL, thực hiện tuần tự qua Supabase client
+        console.warn('RPC not available, falling back to direct client operations:', rpcResult.error.message);
+
+        // Lấy hoặc tạo period
+        let periodId: string;
+        const { data: existingPeriod } = await supabase
+          .from('tax_periods')
+          .select('id')
+          .eq('period', period)
+          .maybeSingle();
+
+        if (existingPeriod?.id) {
+          periodId = existingPeriod.id;
+        } else {
+          const { data: newPeriod, error: pErr } = await supabase
+            .from('tax_periods')
+            .insert({ period, notes: `Tính ngày ${new Date().toLocaleDateString('vi-VN')}` })
+            .select('id')
+            .single();
+          if (pErr) throw pErr;
+          periodId = newPeriod.id;
+        }
+
+        // Xóa sạch các dòng cũ của kỳ này
+        await supabase.from('payroll_items').delete().eq('period_id', periodId);
+
+        // Chèn mới
+        const insertRows = payloadItems.map((pi) => ({
+          period_id: periodId,
+          ...pi,
+        }));
+        const { error: insErr } = await supabase.from('payroll_items').insert(insertRows);
+        if (insErr) throw insErr;
+      }
 
       setSaveSuccess(true);
       setNotification({
         type: 'success',
-        message: `Đã lưu thành công bảng tính thuế kỳ ${period} vào hệ thống!`,
+        message: `Đã lưu thành công và ghi đè bảng tính thuế kỳ ${period} vào hệ thống!`,
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: 'Lỗi khi lưu bảng thuế: ' + err.message });
@@ -319,7 +333,6 @@ export default function TaxCalculationPage() {
     }
   };
 
-  // Xuất file Excel bảng thuế
   const handleExportExcel = () => {
     if (calculatedItems.length === 0) return;
 
@@ -331,15 +344,15 @@ export default function TaxCalculationPage() {
       full_name: item.HoTen,
       tax_code: item.MaSoThue || null,
       total_income: item.TongThuNhap,
-      non_taxable_income: item.KhgChiuThue,
+      non_taxable_income: item.KhongChiuThue,
       insurance: item.BaoHiem,
       dependent_count: item.dependentCount,
-      personal_deduction: item.personalDeduction,
-      dependent_deduction: item.dependentDeduction,
-      taxable_income: item.taxableIncome,
-      assessable_income: item.assessableIncome,
-      pit_amount: item.pitAmount,
-      calculation_breakdown: item.breakdown,
+      personal_deduction: item.calcResult.personalDeduction,
+      dependent_deduction: item.calcResult.dependentDeduction,
+      taxable_income: item.calcResult.taxableIncome,
+      assessable_income: item.calcResult.assessableIncome,
+      pit_amount: item.calcResult.finalPitAmount,
+      calculation_breakdown: item.calcResult.breakdown,
       created_at: '',
       updated_at: '',
     }));
@@ -349,7 +362,6 @@ export default function TaxCalculationPage() {
 
   return (
     <div className="space-y-6">
-      {/* Notification banner */}
       {notification && (
         <div
           className={`p-4 rounded-xl flex items-center justify-between shadow-md animate-fadeIn ${
@@ -366,7 +378,7 @@ export default function TaxCalculationPage() {
             )}
             <span className="text-sm font-medium">{notification.message}</span>
           </div>
-          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75">
+          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75 cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -377,10 +389,10 @@ export default function TaxCalculationPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2.5">
             <Receipt className="w-7 h-7 text-emerald-600" />
-            <span>Tính Thuế Thu Nhập Cá Nhân Theo Tháng</span>
+            <span>Tính Thuế TNCN Theo Tháng (Biểu 5 Bậc 2026)</span>
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Import bảng thu nhập &bull; Tự động xét duyệt người phụ thuộc &bull; Tính lũy tiến 7 bậc
+            Biểu thuế 5 bậc Luật 109/2025/QH15 &bull; Giảm trừ bản thân 15.5tr &bull; NPT 6.2tr &bull; Làm tròn xuống nghìn
           </p>
         </div>
 
@@ -396,7 +408,6 @@ export default function TaxCalculationPage() {
       {/* Control Box: Chọn kỳ & Upload Excel */}
       <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
-          {/* Chọn kỳ tính thuế */}
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center gap-1.5">
               <Calendar className="w-4 h-4 text-emerald-600" />
@@ -406,18 +417,17 @@ export default function TaxCalculationPage() {
               type="month"
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
-              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition"
+              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              Người phụ thuộc sẽ được xét hiệu lực dựa trên tháng này
+              Người phụ thuộc sẽ xét hiệu lực trong tháng này
             </p>
           </div>
 
-          {/* Upload file thu nhập */}
           <div className="md:col-span-2">
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center gap-1.5">
               <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-              <span>Import file Excel thu nhập tháng</span>
+              <span>Import file Excel thu nhập tháng (Cột: KhongChiuThue)</span>
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -443,33 +453,48 @@ export default function TaxCalculationPage() {
                 </span>
               </button>
 
-              {rawRows.length > 0 && (
+              {rawValidRows.length > 0 && (
                 <button
                   type="button"
                   onClick={handleCalculateTax}
                   className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-semibold transition shadow-md shadow-emerald-200 flex items-center gap-1.5 cursor-pointer flex-shrink-0"
                 >
                   <Calculator className="w-4 h-4" />
-                  <span>Tính lại thuế</span>
+                  <span>Tính lại</span>
                 </button>
               )}
             </div>
           </div>
         </div>
 
-        {/* Gợi ý cột */}
+        {/* Danh sách lỗi khi import file thu nhập */}
+        {importErrors.length > 0 && (
+          <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 space-y-1">
+            <p className="font-bold flex items-center gap-1.5 text-rose-800">
+              <AlertCircle className="w-4 h-4" />
+              Có {importErrors.length} dòng dữ liệu bị lỗi trong file Excel (đã bỏ qua):
+            </p>
+            {importErrors.slice(0, 5).map((err, i) => (
+              <p key={i}>&bull; {err}</p>
+            ))}
+            {importErrors.length > 5 && (
+              <p className="italic">...và {importErrors.length - 5} dòng lỗi khác.</p>
+            )}
+          </div>
+        )}
+
         <div className="pt-2 border-t border-slate-100 text-xs text-slate-500 flex flex-wrap items-center gap-x-4 gap-y-1">
-          <span className="font-semibold text-slate-700">Các cột file Excel:</span>
-          <span>&bull; MaNV (Mã nhân viên)</span>
-          <span>&bull; HoTen (Họ tên)</span>
-          <span>&bull; MaSoThue (MST)</span>
-          <span>&bull; TongThuNhap (Tổng TN trong tháng)</span>
-          <span>&bull; KhgChiuThue (Thu nhập không chịu thuế)</span>
-          <span>&bull; BaoHiem (BHXH, BHYT, BHTN...)</span>
+          <span className="font-semibold text-slate-700">Các cột bắt buộc:</span>
+          <span>&bull; MaNV (phải tồn tại trong CSDL)</span>
+          <span>&bull; HoTen</span>
+          <span>&bull; MaSoThue</span>
+          <span>&bull; TongThuNhap</span>
+          <span>&bull; KhongChiuThue</span>
+          <span>&bull; BaoHiem</span>
         </div>
       </div>
 
-      {/* Thống kê kết quả sau khi tính */}
+      {/* Thống kê sau khi tính */}
       {calculatedItems.length > 0 && (
         <div className="space-y-4">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
@@ -479,24 +504,24 @@ export default function TaxCalculationPage() {
                 {summary.totalEmployees}
               </p>
               <p className="text-xs text-emerald-600 mt-0.5">
-                {summary.employeesWithTax} người phải nộp thuế
+                {summary.employeesWithTax} người có thuế phải nộp
               </p>
             </div>
 
             <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
               <p className="text-[11px] font-semibold text-slate-500 uppercase">Tổng thu nhập</p>
               <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1">
-                {formatCurrency(summary.totalIncome)}
+                {formatCurrencyVND(summary.totalIncome)}
               </p>
               <p className="text-xs text-slate-400 mt-0.5">
-                KCT: {formatCurrency(summary.totalNonTaxable)}
+                KCT: {formatCurrencyVND(summary.totalNonTaxable)}
               </p>
             </div>
 
             <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
               <p className="text-[11px] font-semibold text-slate-500 uppercase">Tổng TNTT (toàn cty)</p>
               <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1">
-                {formatCurrency(summary.totalAssessable)}
+                {formatCurrencyVND(summary.totalAssessable)}
               </p>
               <p className="text-xs text-slate-400 mt-0.5">
                 Sau khi trừ bảo hiểm & gia cảnh
@@ -506,24 +531,24 @@ export default function TaxCalculationPage() {
             <div className="bg-emerald-600 p-4 rounded-2xl text-white shadow-md shadow-emerald-200">
               <p className="text-[11px] font-semibold text-emerald-100 uppercase">Tổng Thuế TNCN Phải Nộp</p>
               <p className="text-xl sm:text-2xl font-bold text-white mt-1">
-                {formatCurrency(summary.totalTax)}
+                {formatCurrencyVND(summary.totalTax)}
               </p>
               <p className="text-xs text-emerald-100/80 mt-0.5">
-                Kỳ thuế: {period}
+                Kỳ thuế: {period} (Làm tròn xuống nghìn)
               </p>
             </div>
           </div>
 
-          {/* Action buttons lưu & xuất Excel */}
+          {/* Action buttons */}
           <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
             <div className="text-xs text-slate-600">
               {saveSuccess ? (
                 <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  Đã lưu vào cơ sở dữ liệu hệ thống
+                  Đã ghi đè và lưu kết quả vào hệ thống thành công!
                 </span>
               ) : (
-                <span>Bấm <strong>"Lưu vào hệ thống"</strong> để ghi nhận kỳ thuế này vào lịch sử</span>
+                <span>Bấm <strong>"Lưu vào hệ thống"</strong> để ghi nhận kỳ thuế (tự động ghi đè sạch sẽ nếu kỳ đã có)</span>
               )}
             </div>
 
@@ -534,7 +559,7 @@ export default function TaxCalculationPage() {
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium text-xs sm:text-sm rounded-xl border border-slate-300 transition cursor-pointer"
               >
                 <Download className="w-4 h-4 text-slate-500" />
-                <span>Xuất Excel bảng thuế</span>
+                <span>Xuất Excel</span>
               </button>
 
               <button
@@ -558,7 +583,7 @@ export default function TaxCalculationPage() {
             </div>
           </div>
 
-          {/* Bảng chi tiết kết quả tính thuế */}
+          {/* Bảng chi tiết */}
           <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2 className="text-base font-bold text-slate-800">
@@ -581,7 +606,7 @@ export default function TaxCalculationPage() {
                     <th className="py-3 px-3 text-center">Số NPT</th>
                     <th className="py-3 px-3 text-right">Giảm trừ NPT</th>
                     <th className="py-3 px-3 text-right">TN Tính Thuế</th>
-                    <th className="py-3 px-3 text-right font-bold text-emerald-800">Thuế TNCN</th>
+                    <th className="py-3 px-3 text-right font-bold text-emerald-800">Thuế Phải Nộp</th>
                     <th className="py-3 px-3 text-center">Giải trình</th>
                   </tr>
                 </thead>
@@ -598,13 +623,13 @@ export default function TaxCalculationPage() {
                         )}
                       </td>
                       <td className="py-3 px-3 text-right font-medium text-slate-700">
-                        {formatCurrency(item.TongThuNhap)}
+                        {formatCurrencyVND(item.TongThuNhap)}
                       </td>
                       <td className="py-3 px-3 text-right text-slate-600">
-                        {formatCurrency(item.KhgChiuThue)}
+                        {formatCurrencyVND(item.KhongChiuThue)}
                       </td>
                       <td className="py-3 px-3 text-right text-slate-600">
-                        {formatCurrency(item.BaoHiem)}
+                        {formatCurrencyVND(item.BaoHiem)}
                       </td>
                       <td className="py-3 px-3 text-center">
                         <span
@@ -618,13 +643,13 @@ export default function TaxCalculationPage() {
                         </span>
                       </td>
                       <td className="py-3 px-3 text-right text-slate-600">
-                        {formatCurrency(item.dependentDeduction)}
+                        {formatCurrencyVND(item.calcResult.dependentDeduction)}
                       </td>
                       <td className="py-3 px-3 text-right font-semibold text-slate-800">
-                        {formatCurrency(item.assessableIncome)}
+                        {formatCurrencyVND(item.calcResult.assessableIncome)}
                       </td>
                       <td className="py-3 px-3 text-right font-bold text-sm text-emerald-700">
-                        {formatCurrency(item.pitAmount)}
+                        {formatCurrencyVND(item.calcResult.finalPitAmount)}
                       </td>
                       <td className="py-3 px-3 text-center">
                         <button
@@ -633,7 +658,7 @@ export default function TaxCalculationPage() {
                           className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 rounded-lg border border-emerald-200 transition cursor-pointer"
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          <span>Chi tiết</span>
+                          <span>4 Bước</span>
                         </button>
                       </td>
                     </tr>
@@ -645,16 +670,14 @@ export default function TaxCalculationPage() {
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL GIẢI TRÌNH BẬC TÍNH THUẾ CHO 1 NHÂN VIÊN */}
-      {/* ========================================================== */}
+      {/* Modal Giải trình 4 bước minh bạch */}
       {selectedDetailItem && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-xl max-h-[90vh] flex flex-col overflow-hidden animate-scaleIn">
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
               <div>
                 <h3 className="text-base font-bold text-slate-800">
-                  Giải Trình Bậc Tính Thuế TNCN
+                  Giải Trình 4 Bước Tính Thuế TNCN (Luật 109/2025/QH15)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Nhân viên: <strong className="text-slate-800">{selectedDetailItem.HoTen}</strong> ({selectedDetailItem.MaNV}) &bull; Kỳ {period}
@@ -662,86 +685,109 @@ export default function TaxCalculationPage() {
               </div>
               <button
                 onClick={() => setSelectedDetailItem(null)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-6 space-y-4 overflow-y-auto flex-1 text-xs sm:text-sm">
-              {/* Tóm tắt các chỉ số */}
-              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-slate-600">1. Tổng thu nhập trong tháng:</span>
-                  <span className="font-semibold text-slate-800">{formatCurrency(selectedDetailItem.TongThuNhap)}</span>
+              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
+                {/* Bước 1 */}
+                <div>
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">1</span>
+                    Xác định Thu nhập chịu thuế (TNCT):
+                  </p>
+                  <p className="text-slate-600 text-xs mt-1 ml-6">
+                    = Tổng thu nhập ({formatCurrencyVND(selectedDetailItem.TongThuNhap)}) - Thu nhập không chịu thuế ({formatCurrencyVND(selectedDetailItem.KhongChiuThue)})
+                  </p>
+                  <p className="font-bold text-slate-900 ml-6 mt-0.5">
+                    &rarr; TNCT = {formatCurrencyVND(selectedDetailItem.calcResult.taxableIncome)}
+                  </p>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">2. Thu nhập không chịu thuế:</span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.KhgChiuThue)}</span>
+
+                {/* Bước 2 */}
+                <div className="border-t border-slate-200 pt-2.5">
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">2</span>
+                    Xác định Tổng các khoản giảm trừ:
+                  </p>
+                  <div className="text-slate-600 text-xs space-y-0.5 ml-6 mt-1">
+                    <p>&bull; Bảo hiểm bắt buộc: {formatCurrencyVND(selectedDetailItem.BaoHiem)}</p>
+                    <p>&bull; Giảm trừ bản thân: {formatCurrencyVND(selectedDetailItem.calcResult.personalDeduction)}</p>
+                    <p>&bull; Giảm trừ người phụ thuộc ({selectedDetailItem.dependentCount} người): {formatCurrencyVND(selectedDetailItem.calcResult.dependentDeduction)}</p>
+                  </div>
+                  <p className="font-bold text-slate-900 ml-6 mt-0.5">
+                    &rarr; Tổng giảm trừ = {formatCurrencyVND(selectedDetailItem.calcResult.totalDeductions)}
+                  </p>
                 </div>
-                <div className="flex justify-between border-t border-slate-200 pt-1.5">
-                  <span className="text-slate-700 font-medium">&rArr; Thu nhập chịu thuế (TNCT):</span>
-                  <span className="font-bold text-slate-900">{formatCurrency(selectedDetailItem.taxableIncome)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">3. Giảm trừ bản thân:</span>
-                  <span className="font-semibold text-slate-800">- 11.000.000 ₫</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">
-                    4. Giảm trừ người phụ thuộc ({selectedDetailItem.dependentCount} người &times; 4,4 tr):
-                  </span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.dependentDeduction)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">5. Các khoản bảo hiểm bắt buộc:</span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.BaoHiem)}</span>
-                </div>
-                <div className="flex justify-between border-t-2 border-emerald-600 pt-2 text-emerald-900 font-bold">
-                  <span>&rArr; Thu nhập tính thuế (TNTT):</span>
-                  <span className="text-base">{formatCurrency(selectedDetailItem.assessableIncome)}</span>
+
+                {/* Bước 3 */}
+                <div className="border-t border-slate-200 pt-2.5">
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">3</span>
+                    Xác định Thu nhập tính thuế (TNTT):
+                  </p>
+                  <p className="text-slate-600 text-xs mt-1 ml-6">
+                    = max(0, TNCT - Tổng giảm trừ)
+                  </p>
+                  <p className="font-bold text-emerald-800 ml-6 mt-0.5 text-sm">
+                    &rarr; TNTT = {formatCurrencyVND(selectedDetailItem.calcResult.assessableIncome)}
+                  </p>
                 </div>
               </div>
 
-              {/* Chi tiết từng bậc */}
+              {/* Bước 4 */}
               <div>
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-                  Phân rã theo biểu thuế lũy tiến từng phần (7 bậc)
-                </h4>
+                <p className="font-bold text-slate-800 flex items-center gap-1.5 mb-2">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">4</span>
+                  Tính thuế theo Biểu lũy tiến 5 bậc (Luật 109/2025/QH15):
+                </p>
                 <div className="border border-slate-200 rounded-xl overflow-hidden">
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-100 text-slate-700">
                       <tr>
                         <th className="py-2 px-3">Bậc</th>
-                        <th className="py-2 px-3">Thuế suất</th>
-                        <th className="py-2 px-3 text-right">Phần thu nhập chịu thuế</th>
+                        <th className="py-2 px-3">Mức TNTT / tháng</th>
+                        <th className="py-2 px-3 text-center">Thuế suất</th>
+                        <th className="py-2 px-3 text-right">Phần TNTT</th>
                         <th className="py-2 px-3 text-right">Tiền thuế</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {selectedDetailItem.breakdown.map((b) => (
+                      {selectedDetailItem.calcResult.breakdown.map((b) => (
                         <tr
                           key={b.bracket}
                           className={b.taxAmount > 0 ? 'bg-emerald-50/50 font-medium' : 'text-slate-400'}
                         >
                           <td className="py-2 px-3 font-semibold">Bậc {b.bracket}</td>
-                          <td className="py-2 px-3">{Math.round(b.rate * 100)}%</td>
+                          <td className="py-2 px-3 text-[11px]">{b.bracketName.split(':')[1]?.trim() || ''}</td>
+                          <td className="py-2 px-3 text-center">{Math.round(b.rate * 100)}%</td>
                           <td className="py-2 px-3 text-right font-mono">
-                            {formatCurrency(b.taxablePortion)}
+                            {formatCurrencyVND(b.taxablePortion)}
                           </td>
                           <td className="py-2 px-3 text-right font-mono font-bold text-emerald-700">
-                            {formatCurrency(b.taxAmount)}
+                            {formatCurrencyVND(b.taxAmount)}
                           </td>
                         </tr>
                       ))}
                     </tbody>
-                    <tfoot className="bg-emerald-100/60 font-bold text-emerald-950 border-t border-emerald-200">
+                    <tfoot className="border-t border-slate-200 bg-slate-50 text-xs">
                       <tr>
-                        <td colSpan={3} className="py-2.5 px-3">
-                          TỔNG THUẾ TNCN PHẢI NỘP TRONG THÁNG:
+                        <td colSpan={4} className="py-2 px-3 font-semibold text-slate-700">
+                          Tổng thuế trước khi làm tròn:
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-slate-800">
+                          {formatCurrencyVND(selectedDetailItem.calcResult.rawTax)}
+                        </td>
+                      </tr>
+                      <tr className="bg-emerald-100/70 font-bold text-emerald-950 border-t border-emerald-300">
+                        <td colSpan={4} className="py-2.5 px-3">
+                          THUẾ PHẢI NỘP (LÀM TRÒN XUỐNG NGHÌN):
                         </td>
                         <td className="py-2.5 px-3 text-right font-mono text-sm text-emerald-800">
-                          {formatCurrency(selectedDetailItem.pitAmount)}
+                          {formatCurrencyVND(selectedDetailItem.calcResult.finalPitAmount)}
                         </td>
                       </tr>
                     </tfoot>
@@ -756,7 +802,7 @@ export default function TaxCalculationPage() {
                 onClick={() => setSelectedDetailItem(null)}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer"
               >
-                Đóng giải trình
+                Đóng
               </button>
             </div>
           </div>
@@ -765,4 +811,3 @@ export default function TaxCalculationPage() {
     </div>
   );
 }
-

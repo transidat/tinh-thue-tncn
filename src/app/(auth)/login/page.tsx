@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { Calculator, Lock, Mail, AlertCircle, ArrowRight, Loader2 } from 'lucide-react';
 
@@ -33,7 +32,7 @@ export default function LoginPage() {
       });
 
       if (error) {
-        // Đúng theo yêu cầu người dùng: hiển thị "Email hoặc mật khẩu không đúng"
+        // Đúng yêu cầu: Hiển thị "Email hoặc mật khẩu không đúng"
         setErrorMsg('Email hoặc mật khẩu không đúng');
         setLoading(false);
         return;
@@ -68,7 +67,7 @@ export default function LoginPage() {
           <div className="mb-6">
             <h2 className="text-xl font-semibold text-slate-800">Đăng nhập</h2>
             <p className="text-xs sm:text-sm text-slate-500 mt-1">
-              Nhập email và mật khẩu kế toán để tiếp tục
+              Nhập email và mật khẩu tài khoản kế toán để tiếp tục
             </p>
           </div>
 
@@ -136,26 +135,13 @@ export default function LoginPage() {
               )}
             </button>
           </form>
-
-          <div className="mt-6 pt-5 border-t border-slate-100 text-center">
-            <p className="text-xs sm:text-sm text-slate-500">
-              Chưa có tài khoản kế toán?{' '}
-              <Link
-                href="/register"
-                className="font-semibold text-emerald-600 hover:text-emerald-700 hover:underline"
-              >
-                Đăng ký ngay
-              </Link>
-            </p>
-          </div>
         </div>
 
         {/* Footer info */}
         <p className="text-center text-xs text-slate-400 mt-6">
-          Tuân thủ biểu thuế lũy tiến từng phần & Nghị quyết 954/2020/UBTVQH14
+          Biểu thuế 5 bậc theo Luật Thuế TNCN 2025 (số 109/2025/QH15)
         </p>
       </div>
     </div>
   );
 }
-

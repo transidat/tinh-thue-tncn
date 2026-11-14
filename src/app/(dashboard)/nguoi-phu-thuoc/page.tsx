@@ -16,11 +16,19 @@ import {
   Loader2,
   X,
   Calendar,
-  Clock,
-  User,
-  ShieldCheck,
-  ShieldAlert
+  Clock
 } from 'lucide-react';
+import { DEPENDENT_DEDUCTION, formatCurrencyVND } from '@/config/tax-rules';
+
+const RELATIONSHIP_OPTIONS = [
+  'Con',
+  'Vợ/Chồng',
+  'Bố đẻ',
+  'Mẹ đẻ',
+  'Bố chồng/vợ',
+  'Mẹ chồng/vợ',
+  'Người thân khác',
+];
 
 export default function DependentsPage() {
   const supabase = createClient();
@@ -29,12 +37,10 @@ export default function DependentsPage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Bộ lọc
   const [searchQuery, setSearchQuery] = useState('');
   const [employeeFilter, setEmployeeFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
 
-  // Notification state
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Form Modal (Thêm / Sửa)
@@ -65,35 +71,44 @@ export default function DependentsPage() {
     }
   }, [notification]);
 
-  // Tải dữ liệu ban đầu
+  const currentMonth = useMemo(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }, []);
+
   const fetchData = async () => {
     try {
       setLoading(true);
 
-      // 1. Tải danh sách nhân viên
-      const { data: emps, error: empErr } = await supabase
-        .from('employees')
-        .select('*')
-        .order('full_name', { ascending: true });
-      if (empErr) throw empErr;
-      setEmployees(emps || []);
+      const [empRes, depRes] = await Promise.all([
+        supabase
+          .from('employees')
+          .select('*')
+          .order('full_name', { ascending: true }),
+        supabase
+          .from('dependents')
+          .select(`
+            *,
+            employees:employee_id (
+              id,
+              employee_code,
+              full_name,
+              department,
+              is_deleted
+            )
+          `)
+          .order('created_at', { ascending: false }),
+      ]);
 
-      // 2. Tải danh sách người phụ thuộc kèm thông tin nhân viên
-      const { data: deps, error: depErr } = await supabase
-        .from('dependents')
-        .select(`
-          *,
-          employees:employee_id (
-            id,
-            employee_code,
-            full_name,
-            department
-          )
-        `)
-        .order('created_at', { ascending: false });
+      if (empRes.error) throw empRes.error;
+      if (depRes.error) throw depRes.error;
 
-      if (depErr) throw depErr;
-      setDependents(deps || []);
+      // Chỉ chọn các nhân viên chưa bị xóa mềm
+      const activeEmps = (empRes.data || []).filter((e) => !e.is_deleted);
+      setEmployees(activeEmps);
+      setDependents(depRes.data || []);
     } catch (err: any) {
       setNotification({ type: 'error', message: 'Lỗi tải dữ liệu: ' + err.message });
     } finally {
@@ -103,14 +118,6 @@ export default function DependentsPage() {
 
   useEffect(() => {
     fetchData();
-  }, []);
-
-  // Tính toán trạng thái hiệu lực hiện tại theo tháng năm này
-  const currentMonth = useMemo(() => {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-    return `${y}-${m}`;
   }, []);
 
   const getStatusBadge = (dep: Dependent) => {
@@ -149,19 +156,15 @@ export default function DependentsPage() {
     );
   };
 
-  // Lọc danh sách
   const filteredDependents = useMemo(() => {
     return dependents.filter((dep) => {
-      // 1. Lọc theo nhân viên
       if (employeeFilter !== 'all' && dep.employee_id !== employeeFilter) {
         return false;
       }
 
-      // 2. Lọc theo trạng thái
       if (statusFilter === 'active' && dep.is_inactive) return false;
       if (statusFilter === 'inactive' && !dep.is_inactive) return false;
 
-      // 3. Tìm kiếm
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase().trim();
       const empName = dep.employees?.full_name?.toLowerCase() || '';
@@ -182,7 +185,6 @@ export default function DependentsPage() {
     });
   }, [dependents, employeeFilter, statusFilter, searchQuery]);
 
-  // Mở modal Thêm
   const handleOpenAdd = () => {
     setEditingDependent(null);
     setFormData({
@@ -193,14 +195,13 @@ export default function DependentsPage() {
       tax_code: '',
       id_card_number: '',
       deduction_from: currentMonth,
-      deduction_to: '',
+      deduction_to: `${new Date().getFullYear()}-12`, // Mặc định hết năm
       is_inactive: false,
     });
     setFormError('');
     setIsFormOpen(true);
   };
 
-  // Mở modal Sửa
   const handleOpenEdit = (dep: Dependent) => {
     setEditingDependent(dep);
     setFormData({
@@ -218,7 +219,6 @@ export default function DependentsPage() {
     setIsFormOpen(true);
   };
 
-  // Submit Form Thêm/Sửa
   const handleSubmitForm = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -232,16 +232,21 @@ export default function DependentsPage() {
       return;
     }
     if (!formData.relationship.trim()) {
-      setFormError('Vui lòng nhập mối quan hệ với nhân viên.');
+      setFormError('Vui lòng chọn mối quan hệ.');
       return;
     }
+    // Bắt buộc cả 2 mốc thời gian Từ và Đến
     if (!formData.deduction_from) {
       setFormError('Vui lòng chọn mốc thời gian bắt đầu giảm trừ (Từ tháng/năm).');
       return;
     }
+    if (!formData.deduction_to) {
+      setFormError('Vui lòng chọn mốc thời gian kết thúc giảm trừ (Đến tháng/năm).');
+      return;
+    }
 
-    if (formData.deduction_to && formData.deduction_from > formData.deduction_to) {
-      setFormError('Thời gian bắt đầu giảm trừ phải nhỏ hơn hoặc bằng thời gian kết thúc.');
+    if (formData.deduction_from > formData.deduction_to) {
+      setFormError('Thời gian bắt đầu (Từ) phải nhỏ hơn hoặc bằng thời gian kết thúc (Đến).');
       return;
     }
 
@@ -249,7 +254,6 @@ export default function DependentsPage() {
 
     try {
       if (editingDependent) {
-        // Cập nhật
         const { error } = await supabase
           .from('dependents')
           .update({
@@ -260,7 +264,7 @@ export default function DependentsPage() {
             tax_code: formData.tax_code.trim() || null,
             id_card_number: formData.id_card_number.trim() || null,
             deduction_from: formData.deduction_from,
-            deduction_to: formData.deduction_to || null,
+            deduction_to: formData.deduction_to,
             is_inactive: formData.is_inactive,
             updated_at: new Date().toISOString(),
           })
@@ -269,7 +273,6 @@ export default function DependentsPage() {
         if (error) throw error;
         setNotification({ type: 'success', message: 'Cập nhật người phụ thuộc thành công!' });
       } else {
-        // Thêm mới
         const { error } = await supabase.from('dependents').insert({
           employee_id: formData.employee_id,
           full_name: formData.full_name.trim(),
@@ -278,7 +281,7 @@ export default function DependentsPage() {
           tax_code: formData.tax_code.trim() || null,
           id_card_number: formData.id_card_number.trim() || null,
           deduction_from: formData.deduction_from,
-          deduction_to: formData.deduction_to || null,
+          deduction_to: formData.deduction_to,
           is_inactive: formData.is_inactive,
         });
 
@@ -295,7 +298,6 @@ export default function DependentsPage() {
     }
   };
 
-  // Xác nhận Xóa
   const handleDeleteConfirm = async () => {
     if (!deletingDependent) return;
     setDeleteSubmitting(true);
@@ -320,7 +322,6 @@ export default function DependentsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Thông báo Notification */}
       {notification && (
         <div
           className={`p-4 rounded-xl flex items-center justify-between shadow-md animate-fadeIn ${
@@ -337,13 +338,13 @@ export default function DependentsPage() {
             )}
             <span className="text-sm font-medium">{notification.message}</span>
           </div>
-          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75">
+          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75 cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Header & Action Button */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2.5">
@@ -353,7 +354,7 @@ export default function DependentsPage() {
           <p className="text-sm text-slate-500 mt-1">
             Tổng cộng: <strong className="text-slate-700">{dependents.length}</strong> hồ sơ &bull;{' '}
             Mức giảm trừ:{' '}
-            <strong className="text-emerald-700">4.400.000 ₫/người/tháng</strong>
+            <strong className="text-emerald-700">{formatCurrencyVND(DEPENDENT_DEDUCTION)}/người/tháng</strong> (Luật 109/2025/QH15)
           </p>
         </div>
 
@@ -368,7 +369,6 @@ export default function DependentsPage() {
 
       {/* Filter and Search Bar */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs flex flex-col md:flex-row items-stretch md:items-center gap-3">
-        {/* Search Input */}
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
@@ -380,7 +380,6 @@ export default function DependentsPage() {
           />
         </div>
 
-        {/* Filter by Employee */}
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-slate-400 hidden sm:block" />
           <select
@@ -396,7 +395,6 @@ export default function DependentsPage() {
             ))}
           </select>
 
-          {/* Filter by Status */}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as any)}
@@ -431,7 +429,7 @@ export default function DependentsPage() {
             <table className="w-full text-left text-xs sm:text-sm">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
-                  <th className="py-3 px-4">Nhân viên</th>
+                  <th className="py-3 px-4">Nhân viên bảo trợ</th>
                   <th className="py-3 px-4">Họ tên người phụ thuộc</th>
                   <th className="py-3 px-4">Mối quan hệ</th>
                   <th className="py-3 px-4">Ngày sinh</th>
@@ -449,7 +447,6 @@ export default function DependentsPage() {
                       dep.is_inactive ? 'bg-slate-50/50 text-slate-400' : ''
                     }`}
                   >
-                    {/* Nhân viên liên kết */}
                     <td className="py-3 px-4">
                       {dep.employees ? (
                         <div>
@@ -466,19 +463,16 @@ export default function DependentsPage() {
                       )}
                     </td>
 
-                    {/* Họ tên NPT */}
                     <td className="py-3 px-4 font-semibold text-slate-900">
                       {dep.full_name}
                     </td>
 
-                    {/* Mối quan hệ */}
                     <td className="py-3 px-4 text-slate-700">
-                      <span className="inline-block px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-medium">
+                      <span className="inline-block px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-xs font-medium">
                         {dep.relationship}
                       </span>
                     </td>
 
-                    {/* Ngày sinh */}
                     <td className="py-3 px-4 text-slate-600">
                       {dep.birth_date ? (
                         new Date(dep.birth_date).toLocaleDateString('vi-VN')
@@ -487,7 +481,6 @@ export default function DependentsPage() {
                       )}
                     </td>
 
-                    {/* MST / CCCD */}
                     <td className="py-3 px-4 font-mono text-slate-600 text-xs">
                       {dep.tax_code && <div>MST: {dep.tax_code}</div>}
                       {dep.id_card_number && <div>CCCD: {dep.id_card_number}</div>}
@@ -496,34 +489,31 @@ export default function DependentsPage() {
                       )}
                     </td>
 
-                    {/* Thời gian giảm trừ */}
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-1.5 font-mono text-xs text-slate-700">
                         <Calendar className="w-3.5 h-3.5 text-slate-400" />
                         <span>
-                          {dep.deduction_from} &rarr; {dep.deduction_to || 'Vô thời hạn'}
+                          {dep.deduction_from} &rarr; {dep.deduction_to}
                         </span>
                       </div>
                     </td>
 
-                    {/* Trạng thái hiệu lực */}
                     <td className="py-3 px-4 text-center">
                       {getStatusBadge(dep)}
                     </td>
 
-                    {/* Thao tác */}
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <button
                           onClick={() => handleOpenEdit(dep)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition"
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition cursor-pointer"
                           title="Chỉnh sửa thông tin"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
                         <button
                           onClick={() => setDeletingDependent(dep)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-700 hover:bg-rose-50 transition"
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-700 hover:bg-rose-50 transition cursor-pointer"
                           title="Xóa người phụ thuộc"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -538,9 +528,7 @@ export default function DependentsPage() {
         )}
       </div>
 
-      {/* ========================================================== */}
-      {/* MODAL THÊM / CHỈNH SỬA NGƯỜI PHỤ THUỘC */}
-      {/* ========================================================== */}
+      {/* Modal Thêm / Chỉnh sửa */}
       {isFormOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden animate-scaleIn">
@@ -550,7 +538,7 @@ export default function DependentsPage() {
               </h2>
               <button
                 onClick={() => setIsFormOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -564,7 +552,6 @@ export default function DependentsPage() {
                 </div>
               )}
 
-              {/* Chọn nhân viên */}
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
                   Nhân viên bảo trợ <span className="text-rose-500">*</span>
@@ -584,7 +571,6 @@ export default function DependentsPage() {
                 </select>
               </div>
 
-              {/* Họ tên NPT & Mối quan hệ */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
@@ -609,17 +595,15 @@ export default function DependentsPage() {
                     onChange={(e) => setFormData({ ...formData, relationship: e.target.value })}
                     className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition"
                   >
-                    <option value="Con">Con (dưới 18 tuổi hoặc đang học)</option>
-                    <option value="Vợ/Chồng">Vợ / Chồng</option>
-                    <option value="Cha đẻ/Mẹ đẻ">Cha đẻ / Mẹ đẻ</option>
-                    <option value="Cha chồng/Mẹ chồng">Cha chồng / Mẹ chồng</option>
-                    <option value="Cha vợ/Mẹ vợ">Cha vợ / Mẹ vợ</option>
-                    <option value="Người thân khác">Người thân khác không nơi nương tựa</option>
+                    {RELATIONSHIP_OPTIONS.map((rel) => (
+                      <option key={rel} value={rel}>
+                        {rel}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
 
-              {/* Ngày sinh & MST / CCCD */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
@@ -660,10 +644,10 @@ export default function DependentsPage() {
                 </div>
               </div>
 
-              {/* Thời gian giảm trừ: Từ tháng/năm đến tháng/năm */}
+              {/* Bắt buộc cả 2 mốc Từ tháng/năm và Đến tháng/năm */}
               <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-700 block">
-                  Thời gian tính giảm trừ gia cảnh
+                  Thời gian tính giảm trừ gia cảnh (bắt buộc cả 2 mốc)
                 </span>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -681,10 +665,11 @@ export default function DependentsPage() {
 
                   <div>
                     <label className="block text-xs text-slate-600 mb-1">
-                      Đến tháng/năm <span className="text-slate-400 font-normal">(bỏ trống nếu vô thời hạn)</span>
+                      Đến tháng/năm <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="month"
+                      required
                       value={formData.deduction_to}
                       onChange={(e) => setFormData({ ...formData, deduction_to: e.target.value })}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
@@ -693,7 +678,6 @@ export default function DependentsPage() {
                 </div>
               </div>
 
-              {/* Checkbox Đánh dấu không còn sử dụng */}
               <div className="pt-1">
                 <label className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100/70 transition">
                   <input
@@ -707,7 +691,7 @@ export default function DependentsPage() {
                       Đánh dấu không còn sử dụng (không tính giảm trừ)
                     </span>
                     <p className="text-xs text-slate-500">
-                      Khi tích chọn, người phụ thuộc này sẽ không được đưa vào tính giảm trừ thuế trong bất kỳ kỳ lương nào.
+                      Khi tích chọn, người phụ thuộc này sẽ không được đưa vào giảm trừ trong bất kỳ kỳ lương nào.
                     </p>
                   </div>
                 </label>
@@ -717,7 +701,7 @@ export default function DependentsPage() {
                 <button
                   type="button"
                   onClick={() => setIsFormOpen(false)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                 >
                   Hủy bỏ
                 </button>
@@ -735,9 +719,7 @@ export default function DependentsPage() {
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL XÁC NHẬN XÓA NPT */}
-      {/* ========================================================== */}
+      {/* Modal Xác nhận Xóa NPT */}
       {deletingDependent && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md p-6">
@@ -756,7 +738,7 @@ export default function DependentsPage() {
               <button
                 type="button"
                 onClick={() => setDeletingDependent(null)}
-                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
                 Hủy
               </button>
@@ -764,7 +746,7 @@ export default function DependentsPage() {
                 type="button"
                 onClick={handleDeleteConfirm}
                 disabled={deleteSubmitting}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60"
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60 cursor-pointer"
               >
                 {deleteSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
                 <span>Xác nhận xóa</span>
@@ -776,4 +758,3 @@ export default function DependentsPage() {
     </div>
   );
 }
-

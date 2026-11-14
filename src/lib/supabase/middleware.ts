@@ -6,6 +6,15 @@ export async function updateSession(request: NextRequest) {
     request,
   });
 
+  const pathname = request.nextUrl.pathname;
+
+  // Nếu người dùng cố truy cập trang đăng ký -> chuyển hướng ngay về /login
+  if (pathname === '/register') {
+    const url = request.nextUrl.clone();
+    url.pathname = '/login';
+    return NextResponse.redirect(url);
+  }
+
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -31,18 +40,17 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const pathname = request.nextUrl.pathname;
-  const isAuthPage = pathname === '/login' || pathname === '/register';
+  const isLoginPage = pathname === '/login';
 
-  // Nếu chưa đăng nhập và truy cập trang nghiệp vụ
-  if (!user && !isAuthPage && !pathname.startsWith('/_next') && !pathname.includes('.')) {
+  // Nếu chưa đăng nhập và truy cập trang nghiệp vụ -> chuyển về /login
+  if (!user && !isLoginPage && !pathname.startsWith('/_next') && !pathname.includes('.')) {
     const url = request.nextUrl.clone();
     url.pathname = '/login';
     return NextResponse.redirect(url);
   }
 
-  // Nếu đã đăng nhập mà truy cập trang login hoặc register -> chuyển về dashboard chính
-  if (user && isAuthPage) {
+  // Nếu đã đăng nhập mà vào lại trang /login -> chuyển về trang chính /
+  if (user && isLoginPage) {
     const url = request.nextUrl.clone();
     url.pathname = '/';
     return NextResponse.redirect(url);

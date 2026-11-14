@@ -20,10 +20,13 @@ import {
   X,
   FileCheck,
   Building,
-  CreditCard,
-  Hash
+  RefreshCw
 } from 'lucide-react';
-import { downloadEmployeeTemplate, parseEmployeeExcel, EmployeeImportRow } from '@/lib/excel-utils';
+import {
+  downloadEmployeeTemplate,
+  parseEmployeeExcel,
+  EmployeeImportRow
+} from '@/lib/excel-utils';
 
 export default function EmployeesPage() {
   const supabase = createClient();
@@ -34,10 +37,9 @@ export default function EmployeesPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'resigned'>('all');
   const [deptFilter, setDeptFilter] = useState<string>('all');
 
-  // Notification state
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Form Modal (Add / Edit)
+  // Form Modal (Thêm / Sửa)
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [formData, setFormData] = useState({
@@ -51,19 +53,23 @@ export default function EmployeesPage() {
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
-  // Delete Confirm Modal
+  // Delete Confirm Modal (Xóa mềm)
   const [deletingEmployee, setDeletingEmployee] = useState<Employee | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
 
   // Import Excel Modal
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
-  const [parsedRows, setParsedRows] = useState<EmployeeImportRow[]>([]);
+  const [parsedValidRows, setParsedValidRows] = useState<EmployeeImportRow[]>([]);
+  const [parsedErrorRows, setParsedErrorRows] = useState<{ rowNumber: number; reason: string }[]>([]);
   const [importLoading, setImportLoading] = useState(false);
-  const [importResults, setImportResults] = useState<{ success: number; skipped: number; errors: string[] } | null>(null);
+  const [importResults, setImportResults] = useState<{
+    newCount: number;
+    updatedCount: number;
+    errors: string[];
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Tự ẩn thông báo sau 4 giây
   useEffect(() => {
     if (notification) {
       const timer = setTimeout(() => setNotification(null), 4000);
@@ -71,7 +77,7 @@ export default function EmployeesPage() {
     }
   }, [notification]);
 
-  // Load danh sách nhân viên
+  // Tải danh sách nhân viên chưa bị xóa mềm
   const fetchEmployees = async () => {
     try {
       setLoading(true);
@@ -81,7 +87,10 @@ export default function EmployeesPage() {
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setEmployees(data || []);
+
+      // Lọc bỏ các nhân viên đã bị xóa mềm (is_deleted === true)
+      const activeList = (data || []).filter((e) => !e.is_deleted);
+      setEmployees(activeList);
     } catch (err: any) {
       setNotification({ type: 'error', message: 'Lỗi tải danh sách: ' + err.message });
     } finally {
@@ -93,7 +102,6 @@ export default function EmployeesPage() {
     fetchEmployees();
   }, []);
 
-  // Danh sách các phòng ban duy nhất để lọc
   const departments = useMemo(() => {
     const set = new Set<string>();
     employees.forEach((e) => {
@@ -104,17 +112,12 @@ export default function EmployeesPage() {
     return Array.from(set);
   }, [employees]);
 
-  // Lọc và tìm kiếm
   const filteredEmployees = useMemo(() => {
     return employees.filter((emp) => {
-      // 1. Lọc theo trạng thái làm việc
       if (statusFilter === 'active' && emp.is_resigned) return false;
       if (statusFilter === 'resigned' && !emp.is_resigned) return false;
-
-      // 2. Lọc theo phòng ban
       if (deptFilter !== 'all' && emp.department !== deptFilter) return false;
 
-      // 3. Tìm kiếm từ khóa
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase().trim();
       return (
@@ -127,7 +130,6 @@ export default function EmployeesPage() {
     });
   }, [employees, statusFilter, deptFilter, searchQuery]);
 
-  // Mở modal Thêm
   const handleOpenAdd = () => {
     setEditingEmployee(null);
     setFormData({
@@ -142,7 +144,6 @@ export default function EmployeesPage() {
     setIsFormOpen(true);
   };
 
-  // Mở modal Sửa
   const handleOpenEdit = (emp: Employee) => {
     setEditingEmployee(emp);
     setFormData({
@@ -157,7 +158,6 @@ export default function EmployeesPage() {
     setIsFormOpen(true);
   };
 
-  // Lưu thông tin nhân viên (Thêm mới hoặc Cập nhật)
   const handleSubmitForm = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -206,6 +206,7 @@ export default function EmployeesPage() {
           tax_code: formData.tax_code.trim() || null,
           id_card_number: formData.id_card_number.trim() || null,
           is_resigned: formData.is_resigned,
+          is_deleted: false,
         });
 
         if (error) {
@@ -227,20 +228,27 @@ export default function EmployeesPage() {
     }
   };
 
-  // Xác nhận Xóa nhân viên
+  // Xóa mềm nhân viên (is_deleted = true) để giữ nguyên lịch sử thuế
   const handleDeleteConfirm = async () => {
     if (!deletingEmployee) return;
     setDeleteSubmitting(true);
 
     try {
+      // Thử cập nhật is_deleted: true trước
       const { error } = await supabase
         .from('employees')
-        .delete()
+        .update({ is_deleted: true, updated_at: new Date().toISOString() })
         .eq('id', deletingEmployee.id);
 
-      if (error) throw error;
+      if (error) {
+        // Nếu cột is_deleted chưa có trong schema, thông báo lỗi an toàn
+        throw error;
+      }
 
-      setNotification({ type: 'success', message: `Đã xóa nhân viên ${deletingEmployee.full_name}` });
+      setNotification({
+        type: 'success',
+        message: `Đã xóa nhân viên ${deletingEmployee.full_name} (lịch sử thuế vẫn được lưu giữ an toàn)`,
+      });
       setDeletingEmployee(null);
       fetchEmployees();
     } catch (err: any) {
@@ -250,7 +258,7 @@ export default function EmployeesPage() {
     }
   };
 
-  // Xử lý chọn file Excel
+  // Chọn file Excel
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -258,63 +266,94 @@ export default function EmployeesPage() {
     setImportFile(file);
     setImportResults(null);
     try {
-      const rows = await parseEmployeeExcel(file);
-      setParsedRows(rows);
+      const { validRows, errorRows } = await parseEmployeeExcel(file);
+      setParsedValidRows(validRows);
+      setParsedErrorRows(errorRows.map((er) => ({ rowNumber: er.rowNumber, reason: er.reason })));
     } catch (err: any) {
       setNotification({ type: 'error', message: 'Không thể đọc file Excel: ' + err.message });
-      setParsedRows([]);
+      setParsedValidRows([]);
+      setParsedErrorRows([]);
     }
   };
 
-  // Thực hiện Import danh sách nhân viên từ Excel
+  // Thực hiện Import Excel với cơ chế Upsert (thêm mới hoặc cập nhật ghi đè)
   const handleExecuteImport = async () => {
-    if (parsedRows.length === 0) return;
+    if (parsedValidRows.length === 0 && parsedErrorRows.length === 0) return;
 
     setImportLoading(true);
-    let successCount = 0;
-    let skippedCount = 0;
-    const errors: string[] = [];
+    let newCount = 0;
+    let updatedCount = 0;
+    const errors: string[] = parsedErrorRows.map((e) => `Dòng ${e.rowNumber}: ${e.reason}`);
 
-    // Lấy danh sách mã nhân viên hiện có để tránh trùng
-    const existingCodes = new Set(employees.map((e) => e.employee_code.toLowerCase()));
+    // Tải toàn bộ nhân viên trong CSDL (bao gồm cả nhân viên đã xóa mềm để kiểm tra)
+    const { data: allDbEmps } = await supabase.from('employees').select('*');
+    const existingMap = new Map<string, any>();
+    (allDbEmps || []).forEach((e) => {
+      existingMap.set(e.employee_code.toLowerCase().trim(), e);
+    });
 
-    for (const row of parsedRows) {
-      const code = row.MaNV.trim();
-      if (!code) continue;
+    for (const row of parsedValidRows) {
+      const codeKey = row.MaNV.toLowerCase().trim();
+      const existing = existingMap.get(codeKey);
 
-      if (existingCodes.has(code.toLowerCase())) {
-        skippedCount++;
-        errors.push(`Mã ${code} (${row.HoTen}) đã tồn tại trong hệ thống, bỏ qua.`);
-        continue;
-      }
-
-      try {
-        const { error } = await supabase.from('employees').insert({
-          employee_code: code,
-          full_name: row.HoTen.trim(),
-          department: row.DonVi?.trim() || null,
-          tax_code: row.MaSoThue?.trim() || null,
-          id_card_number: row.SoCCCD?.trim() || null,
-          is_resigned: Boolean(row.DaNghiViec),
-        });
-
-        if (error) {
-          skippedCount++;
-          errors.push(`Lỗi dòng mã ${code}: ${error.message}`);
-        } else {
-          successCount++;
-          existingCodes.add(code.toLowerCase());
+      if (existing) {
+        // Nếu đã bị xóa mềm -> Báo lỗi dòng chờ xác nhận
+        if (existing.is_deleted) {
+          errors.push(`Dòng ${row.rowNumber}: Mã NV "${row.MaNV}" đã bị xóa mềm trước đó, vui lòng khôi phục trong CSDL.`);
+          continue;
         }
-      } catch (err: any) {
-        skippedCount++;
-        errors.push(`Lỗi dòng mã ${code}: ${err.message}`);
+
+        // Nếu nhân viên đang tồn tại -> CẬP NHẬT GHI ĐÈ thông tin
+        try {
+          const { error: updateErr } = await supabase
+            .from('employees')
+            .update({
+              full_name: row.HoTen.trim(),
+              department: row.DonVi?.trim() || null,
+              tax_code: row.MaSoThue?.trim() || null,
+              id_card_number: row.SoCCCD?.trim() || null,
+              is_resigned: Boolean(row.DaNghiViec),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (updateErr) {
+            errors.push(`Dòng ${row.rowNumber} (Mã ${row.MaNV}): ${updateErr.message}`);
+          } else {
+            updatedCount++;
+          }
+        } catch (err: any) {
+          errors.push(`Dòng ${row.rowNumber} (Mã ${row.MaNV}): ${err.message}`);
+        }
+      } else {
+        // Nếu chưa có -> THÊM MỚI
+        try {
+          const { error: insertErr } = await supabase.from('employees').insert({
+            employee_code: row.MaNV.trim(),
+            full_name: row.HoTen.trim(),
+            department: row.DonVi?.trim() || null,
+            tax_code: row.MaSoThue?.trim() || null,
+            id_card_number: row.SoCCCD?.trim() || null,
+            is_resigned: Boolean(row.DaNghiViec),
+            is_deleted: false,
+          });
+
+          if (insertErr) {
+            errors.push(`Dòng ${row.rowNumber} (Mã ${row.MaNV}): ${insertErr.message}`);
+          } else {
+            newCount++;
+            existingMap.set(codeKey, { employee_code: row.MaNV.trim() });
+          }
+        } catch (err: any) {
+          errors.push(`Dòng ${row.rowNumber} (Mã ${row.MaNV}): ${err.message}`);
+        }
       }
     }
 
     setImportResults({
-      success: successCount,
-      skipped: skippedCount,
-      errors: errors.slice(0, 5), // Giữ tối đa 5 lỗi hiển thị
+      newCount,
+      updatedCount,
+      errors: errors.slice(0, 10), // Giữ tối đa 10 lỗi hiển thị
     });
 
     setImportLoading(false);
@@ -380,7 +419,8 @@ export default function EmployeesPage() {
             onClick={() => {
               setIsImportOpen(true);
               setImportFile(null);
-              setParsedRows([]);
+              setParsedValidRows([]);
+              setParsedErrorRows([]);
               setImportResults(null);
             }}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-300 rounded-xl text-xs sm:text-sm font-medium transition shadow-xs cursor-pointer"
@@ -401,7 +441,6 @@ export default function EmployeesPage() {
 
       {/* Filter and Search Bar */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs flex flex-col md:flex-row items-stretch md:items-center gap-3">
-        {/* Search Input */}
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
@@ -413,7 +452,6 @@ export default function EmployeesPage() {
           />
         </div>
 
-        {/* Status Filter */}
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-slate-400 hidden sm:block" />
           <select
@@ -426,7 +464,6 @@ export default function EmployeesPage() {
             <option value="resigned">Đã nghỉ việc</option>
           </select>
 
-          {/* Department Filter */}
           {departments.length > 0 && (
             <select
               value={deptFilter}
@@ -522,15 +559,15 @@ export default function EmployeesPage() {
                       <div className="flex items-center justify-end gap-1">
                         <button
                           onClick={() => handleOpenEdit(emp)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition"
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition cursor-pointer"
                           title="Chỉnh sửa thông tin"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
                         <button
                           onClick={() => setDeletingEmployee(emp)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-700 hover:bg-rose-50 transition"
-                          title="Xóa nhân viên"
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-700 hover:bg-rose-50 transition cursor-pointer"
+                          title="Xóa nhân viên (xóa mềm)"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -544,9 +581,7 @@ export default function EmployeesPage() {
         )}
       </div>
 
-      {/* ========================================================== */}
-      {/* MODAL THÊM / CHỈNH SỬA NHÂN VIÊN */}
-      {/* ========================================================== */}
+      {/* Modal Thêm / Chỉnh sửa */}
       {isFormOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden animate-scaleIn">
@@ -556,7 +591,7 @@ export default function EmployeesPage() {
               </h2>
               <button
                 onClick={() => setIsFormOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -641,7 +676,6 @@ export default function EmployeesPage() {
                 </div>
               </div>
 
-              {/* Checkbox Đã nghỉ việc */}
               <div className="pt-2">
                 <label className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100/70 transition">
                   <input
@@ -655,7 +689,7 @@ export default function EmployeesPage() {
                       Đánh dấu nhân viên đã nghỉ việc
                     </span>
                     <p className="text-xs text-slate-500">
-                      Nhân viên đã nghỉ việc sẽ được phân loại riêng và không nằm trong danh sách tính thuế thường xuyên.
+                      Nhân viên đã nghỉ việc sẽ không đưa vào danh sách tính thuế thường xuyên.
                     </p>
                   </div>
                 </label>
@@ -665,7 +699,7 @@ export default function EmployeesPage() {
                 <button
                   type="button"
                   onClick={() => setIsFormOpen(false)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                 >
                   Hủy bỏ
                 </button>
@@ -683,9 +717,7 @@ export default function EmployeesPage() {
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL XÁC NHẬN XÓA NHÂN VIÊN */}
-      {/* ========================================================== */}
+      {/* Modal Xóa mềm nhân viên */}
       {deletingEmployee && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md p-6">
@@ -693,22 +725,22 @@ export default function EmployeesPage() {
               <Trash2 className="w-6 h-6" />
             </div>
             <h3 className="text-lg font-bold text-slate-800">
-              Xác nhận xóa nhân viên?
+              Xóa nhân viên khỏi danh sách?
             </h3>
             <p className="text-sm text-slate-600 mt-2">
               Bạn có chắc chắn muốn xóa nhân viên{' '}
               <strong className="text-slate-900">{deletingEmployee.full_name}</strong> (Mã:{' '}
               {deletingEmployee.employee_code})?
             </p>
-            <p className="text-xs text-rose-600 mt-2 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
-              Lưu ý: Mọi hồ sơ người phụ thuộc liên quan đến nhân viên này cũng sẽ bị xóa.
+            <p className="text-xs text-emerald-700 mt-2 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+              Cơ chế xóa mềm (Soft Delete): Hồ sơ nhân viên sẽ ẩn khỏi danh sách nhưng toàn bộ lịch sử thuế và bảng lương cũ vẫn được bảo lưu nguyên vẹn.
             </p>
 
             <div className="mt-6 flex items-center justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setDeletingEmployee(null)}
-                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
                 Hủy
               </button>
@@ -716,7 +748,7 @@ export default function EmployeesPage() {
                 type="button"
                 onClick={handleDeleteConfirm}
                 disabled={deleteSubmitting}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60"
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60 cursor-pointer"
               >
                 {deleteSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
                 <span>Xác nhận xóa</span>
@@ -726,9 +758,7 @@ export default function EmployeesPage() {
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL IMPORT EXCEL */}
-      {/* ========================================================== */}
+      {/* Modal Import Excel với cơ chế Upsert */}
       {isImportOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden animate-scaleIn">
@@ -736,19 +766,18 @@ export default function EmployeesPage() {
               <div className="flex items-center gap-2">
                 <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
                 <h2 className="text-lg font-bold text-slate-800">
-                  Import Danh Sách Nhân Viên Từ Excel
+                  Import Danh Sách Nhân Viên (Tự động Cập nhật / Thêm mới)
                 </h2>
               </div>
               <button
                 onClick={() => setIsImportOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-6 space-y-4 overflow-y-auto flex-1">
-              {/* Box Upload */}
               <div
                 onClick={() => fileInputRef.current?.click()}
                 className="border-2 border-dashed border-emerald-300 hover:border-emerald-500 rounded-2xl p-6 text-center bg-emerald-50/40 cursor-pointer transition group"
@@ -765,24 +794,33 @@ export default function EmployeesPage() {
                   {importFile ? importFile.name : 'Bấm vào đây để chọn file Excel (.xlsx, .xls)'}
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Định dạng cột chuẩn: MaNV, HoTen, DonVi, MaSoThue, SoCCCD, DaNghiViec
+                  Định dạng: MaNV (text giữ số 0), HoTen (bắt buộc), DonVi, MaSoThue, SoCCCD, DaNghiViec
                 </p>
               </div>
 
-              {/* Kết quả import nếu có */}
+              {/* Báo cáo kết quả xử lý */}
               {importResults && (
                 <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-sm">
-                  <p className="font-semibold text-slate-800">Kết quả xử lý:</p>
-                  <p className="text-emerald-700 font-medium">
-                    &bull; Đã thêm thành công: <strong>{importResults.success}</strong> nhân viên
-                  </p>
-                  {importResults.skipped > 0 && (
-                    <p className="text-amber-700 font-medium">
-                      &bull; Bỏ qua / Trùng mã: <strong>{importResults.skipped}</strong> dòng
-                    </p>
-                  )}
+                  <p className="font-semibold text-slate-800">Báo cáo kết quả xử lý import:</p>
+                  <div className="flex flex-wrap gap-4 text-xs sm:text-sm">
+                    <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                      <CheckCircle2 className="w-4 h-4" />
+                      Thêm mới: {importResults.newCount} nhân viên
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 text-blue-700 font-semibold bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200">
+                      <RefreshCw className="w-4 h-4" />
+                      Cập nhật (ghi đè): {importResults.updatedCount} nhân viên
+                    </span>
+                    {importResults.errors.length > 0 && (
+                      <span className="inline-flex items-center gap-1.5 text-rose-700 font-semibold bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200">
+                        <AlertCircle className="w-4 h-4" />
+                        Lỗi: {importResults.errors.length} dòng
+                      </span>
+                    )}
+                  </div>
                   {importResults.errors.length > 0 && (
                     <div className="text-xs text-rose-600 bg-rose-50 p-2.5 rounded-lg border border-rose-200 mt-2 space-y-1">
+                      <p className="font-bold">Chi tiết lỗi:</p>
                       {importResults.errors.map((err, i) => (
                         <p key={i}>&bull; {err}</p>
                       ))}
@@ -791,18 +829,33 @@ export default function EmployeesPage() {
                 </div>
               )}
 
-              {/* Xem trước dữ liệu (Preview) */}
-              {parsedRows.length > 0 && !importResults && (
+              {/* Cảnh báo lỗi đọc trước nếu có */}
+              {parsedErrorRows.length > 0 && !importResults && (
+                <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 space-y-1">
+                  <p className="font-bold flex items-center gap-1.5 text-rose-800">
+                    <AlertCircle className="w-4 h-4" />
+                    Phát hiện {parsedErrorRows.length} dòng lỗi trong file (sẽ bị bỏ qua):
+                  </p>
+                  {parsedErrorRows.slice(0, 5).map((err, i) => (
+                    <p key={i}>&bull; Dòng {err.rowNumber}: {err.reason}</p>
+                  ))}
+                  {parsedErrorRows.length > 5 && (
+                    <p className="italic">...và còn {parsedErrorRows.length - 5} dòng lỗi khác.</p>
+                  )}
+                </div>
+              )}
+
+              {/* Xem trước dữ liệu */}
+              {parsedValidRows.length > 0 && !importResults && (
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                      Xem trước {parsedRows.length} dòng dữ liệu:
-                    </span>
-                  </div>
-                  <div className="border border-slate-200 rounded-xl overflow-x-auto max-h-56">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
+                    Xem trước {parsedValidRows.length} dòng hợp lệ sẵn sàng import:
+                  </span>
+                  <div className="border border-slate-200 rounded-xl overflow-x-auto max-h-52">
                     <table className="w-full text-left text-xs">
                       <thead className="bg-slate-100 text-slate-700 sticky top-0">
                         <tr>
+                          <th className="py-2 px-3">Dòng</th>
                           <th className="py-2 px-3">Mã NV</th>
                           <th className="py-2 px-3">Họ tên</th>
                           <th className="py-2 px-3">Đơn vị</th>
@@ -812,8 +865,9 @@ export default function EmployeesPage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {parsedRows.slice(0, 10).map((row, idx) => (
+                        {parsedValidRows.slice(0, 10).map((row, idx) => (
                           <tr key={idx} className="hover:bg-slate-50">
+                            <td className="py-1.5 px-3 text-slate-400">#{row.rowNumber}</td>
                             <td className="py-1.5 px-3 font-mono font-bold text-slate-800">{row.MaNV}</td>
                             <td className="py-1.5 px-3 font-semibold text-slate-900">{row.HoTen}</td>
                             <td className="py-1.5 px-3 text-slate-600">{row.DonVi || '—'}</td>
@@ -831,11 +885,6 @@ export default function EmployeesPage() {
                       </tbody>
                     </table>
                   </div>
-                  {parsedRows.length > 10 && (
-                    <p className="text-[11px] text-slate-400 mt-1 italic">
-                      Đang hiển thị 10/{parsedRows.length} dòng đầu tiên...
-                    </p>
-                  )}
                 </div>
               )}
             </div>
@@ -844,7 +893,7 @@ export default function EmployeesPage() {
               <button
                 type="button"
                 onClick={downloadEmployeeTemplate}
-                className="inline-flex items-center gap-1.5 text-xs text-emerald-700 hover:underline font-medium"
+                className="inline-flex items-center gap-1.5 text-xs text-emerald-700 hover:underline font-medium cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Tải lại file mẫu</span>
@@ -854,16 +903,16 @@ export default function EmployeesPage() {
                 <button
                   type="button"
                   onClick={() => setIsImportOpen(false)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-200/60 rounded-xl transition"
+                  className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-200/60 rounded-xl transition cursor-pointer"
                 >
                   {importResults ? 'Đóng' : 'Hủy'}
                 </button>
-                {parsedRows.length > 0 && !importResults && (
+                {parsedValidRows.length > 0 && !importResults && (
                   <button
                     type="button"
                     onClick={handleExecuteImport}
                     disabled={importLoading}
-                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60"
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm rounded-xl shadow transition flex items-center gap-2 disabled:opacity-60 cursor-pointer"
                   >
                     {importLoading ? (
                       <>
@@ -873,7 +922,7 @@ export default function EmployeesPage() {
                     ) : (
                       <>
                         <FileCheck className="w-4 h-4" />
-                        <span>Tiến hành Import ({parsedRows.length} dòng)</span>
+                        <span>Tiến hành Import ({parsedValidRows.length} dòng)</span>
                       </>
                     )}
                   </button>
@@ -886,4 +935,3 @@ export default function EmployeesPage() {
     </div>
   );
 }
-

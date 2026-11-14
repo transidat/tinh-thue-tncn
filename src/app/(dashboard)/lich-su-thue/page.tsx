@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { TaxPeriod, PayrollItem, TaxBreakdownBracket } from '@/types/database';
+import { TaxPeriod, PayrollItem } from '@/types/database';
 import {
   History,
   Download,
@@ -14,11 +14,10 @@ import {
   CheckCircle2,
   Loader2,
   X,
-  FileSpreadsheet,
   Receipt
 } from 'lucide-react';
 import { exportTaxPayrollToExcel } from '@/lib/excel-utils';
-import { formatCurrency } from '@/lib/tax-calculator';
+import { formatCurrencyVND } from '@/config/tax-rules';
 
 export default function TaxHistoryPage() {
   const supabase = createClient();
@@ -32,10 +31,10 @@ export default function TaxHistoryPage() {
 
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Modal giải trình bậc tính
+  // Modal 4 bước giải trình
   const [selectedDetailItem, setSelectedDetailItem] = useState<PayrollItem | null>(null);
 
-  // Modal xác nhận xóa kỳ thuế
+  // Modal xóa kỳ
   const [confirmDeletePeriod, setConfirmDeletePeriod] = useState<TaxPeriod | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -46,7 +45,6 @@ export default function TaxHistoryPage() {
     }
   }, [notification]);
 
-  // Tải danh sách tất cả kỳ tính thuế
   const fetchPeriods = async () => {
     try {
       setLoadingPeriods(true);
@@ -72,7 +70,6 @@ export default function TaxHistoryPage() {
     fetchPeriods();
   }, []);
 
-  // Tải danh sách payroll_items khi chọn 1 kỳ
   useEffect(() => {
     if (!selectedPeriodId) {
       setPayrollItems([]);
@@ -100,12 +97,11 @@ export default function TaxHistoryPage() {
     fetchItems();
   }, [selectedPeriodId]);
 
-  // Kỳ thuế hiện đang được chọn
   const currentPeriod = useMemo(() => {
     return periods.find((p) => p.id === selectedPeriodId);
   }, [periods, selectedPeriodId]);
 
-  // Lọc tìm kiếm nhân viên trong kỳ
+  // Tìm kiếm nhân viên trong bảng tháng theo Mã NV, Họ tên, MST
   const filteredItems = useMemo(() => {
     if (!searchQuery.trim()) return payrollItems;
     const q = searchQuery.toLowerCase().trim();
@@ -117,7 +113,6 @@ export default function TaxHistoryPage() {
     );
   }, [payrollItems, searchQuery]);
 
-  // Thống kê nhanh của kỳ
   const stats = useMemo(() => {
     let totalIncome = 0;
     let totalTax = 0;
@@ -140,13 +135,11 @@ export default function TaxHistoryPage() {
     };
   }, [payrollItems]);
 
-  // Xuất file Excel
   const handleExportExcel = () => {
     if (!currentPeriod || payrollItems.length === 0) return;
     exportTaxPayrollToExcel(currentPeriod.period, payrollItems);
   };
 
-  // Xóa kỳ thuế
   const handleDeletePeriod = async () => {
     if (!confirmDeletePeriod) return;
     setDeleting(true);
@@ -161,7 +154,7 @@ export default function TaxHistoryPage() {
 
       setNotification({
         type: 'success',
-        message: `Đã xóa lịch sử thuế kỳ ${confirmDeletePeriod.period}`,
+        message: `Đã xóa kỳ thuế ${confirmDeletePeriod.period}`,
       });
       setConfirmDeletePeriod(null);
       fetchPeriods();
@@ -174,7 +167,6 @@ export default function TaxHistoryPage() {
 
   return (
     <div className="space-y-6">
-      {/* Notification banner */}
       {notification && (
         <div
           className={`p-4 rounded-xl flex items-center justify-between shadow-md animate-fadeIn ${
@@ -191,7 +183,7 @@ export default function TaxHistoryPage() {
             )}
             <span className="text-sm font-medium">{notification.message}</span>
           </div>
-          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75">
+          <button onClick={() => setNotification(null)} className="p-1 hover:opacity-75 cursor-pointer">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -205,7 +197,7 @@ export default function TaxHistoryPage() {
             <span>Lịch Sử Đóng Thuế TNCN Theo Tháng</span>
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Tra cứu toàn bộ kỳ tính thuế đã lưu &bull; Xuất báo cáo Excel &bull; Xem giải trình từng người
+            Tra cứu kỳ tính thuế &bull; Tìm kiếm nhân viên &bull; Xuất file Excel báo cáo &bull; Giải trình chi tiết
           </p>
         </div>
 
@@ -233,7 +225,6 @@ export default function TaxHistoryPage() {
 
       {/* Selector & Search Box */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-        {/* Chọn kỳ tháng */}
         <div className="flex items-center gap-2">
           <Calendar className="w-4 h-4 text-emerald-600 flex-shrink-0" />
           <span className="text-xs font-bold text-slate-700 uppercase tracking-wider whitespace-nowrap">
@@ -247,7 +238,7 @@ export default function TaxHistoryPage() {
             <select
               value={selectedPeriodId}
               onChange={(e) => setSelectedPeriodId(e.target.value)}
-              className="px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
+              className="px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 transition cursor-pointer"
             >
               {periods.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -258,7 +249,6 @@ export default function TaxHistoryPage() {
           )}
         </div>
 
-        {/* Tìm kiếm nhân viên */}
         {payrollItems.length > 0 && (
           <div className="relative w-full md:w-80">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -273,7 +263,7 @@ export default function TaxHistoryPage() {
         )}
       </div>
 
-      {/* Cards thống kê của kỳ đang chọn */}
+      {/* Cards thống kê */}
       {currentPeriod && payrollItems.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
@@ -284,19 +274,19 @@ export default function TaxHistoryPage() {
 
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
             <p className="text-[11px] font-semibold text-slate-500 uppercase">Tổng thu nhập tháng</p>
-            <p className="text-base sm:text-lg font-bold text-slate-800 mt-1">{formatCurrency(stats.totalIncome)}</p>
+            <p className="text-base sm:text-lg font-bold text-slate-800 mt-1">{formatCurrencyVND(stats.totalIncome)}</p>
             <p className="text-xs text-slate-400 mt-0.5">Toàn bộ nhân sự</p>
           </div>
 
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
             <p className="text-[11px] font-semibold text-slate-500 uppercase">Tổng TNTT</p>
-            <p className="text-base sm:text-lg font-bold text-slate-800 mt-1">{formatCurrency(stats.totalAssessable)}</p>
+            <p className="text-base sm:text-lg font-bold text-slate-800 mt-1">{formatCurrencyVND(stats.totalAssessable)}</p>
             <p className="text-xs text-slate-400 mt-0.5">Sau các khoản giảm trừ</p>
           </div>
 
           <div className="bg-emerald-600 p-4 rounded-2xl text-white shadow-md shadow-emerald-200">
             <p className="text-[11px] font-semibold text-emerald-100 uppercase">Tổng Thuế TNCN</p>
-            <p className="text-lg sm:text-xl font-bold text-white mt-1">{formatCurrency(stats.totalTax)}</p>
+            <p className="text-lg sm:text-xl font-bold text-white mt-1">{formatCurrencyVND(stats.totalTax)}</p>
             <p className="text-xs text-emerald-100/80 mt-0.5">Kỳ {currentPeriod.period}</p>
           </div>
         </div>
@@ -338,7 +328,7 @@ export default function TaxHistoryPage() {
                   <th className="py-3 px-3 text-center">Số NPT</th>
                   <th className="py-3 px-3 text-right">Giảm trừ NPT</th>
                   <th className="py-3 px-3 text-right">TN Tính thuế</th>
-                  <th className="py-3 px-3 text-right font-bold text-emerald-800">Thuế TNCN</th>
+                  <th className="py-3 px-3 text-right font-bold text-emerald-800">Thuế Phải Nộp</th>
                   <th className="py-3 px-3 text-center">Giải trình</th>
                 </tr>
               </thead>
@@ -355,13 +345,13 @@ export default function TaxHistoryPage() {
                       )}
                     </td>
                     <td className="py-3 px-3 text-right text-slate-700 font-medium">
-                      {formatCurrency(item.total_income)}
+                      {formatCurrencyVND(item.total_income)}
                     </td>
                     <td className="py-3 px-3 text-right text-slate-600">
-                      {formatCurrency(item.non_taxable_income)}
+                      {formatCurrencyVND(item.non_taxable_income)}
                     </td>
                     <td className="py-3 px-3 text-right text-slate-600">
-                      {formatCurrency(item.insurance)}
+                      {formatCurrencyVND(item.insurance)}
                     </td>
                     <td className="py-3 px-3 text-center">
                       <span
@@ -373,13 +363,13 @@ export default function TaxHistoryPage() {
                       </span>
                     </td>
                     <td className="py-3 px-3 text-right text-slate-600">
-                      {formatCurrency(item.dependent_deduction)}
+                      {formatCurrencyVND(item.dependent_deduction)}
                     </td>
                     <td className="py-3 px-3 text-right font-semibold text-slate-800">
-                      {formatCurrency(item.assessable_income)}
+                      {formatCurrencyVND(item.assessable_income)}
                     </td>
                     <td className="py-3 px-3 text-right font-bold text-emerald-700">
-                      {formatCurrency(item.pit_amount)}
+                      {formatCurrencyVND(item.pit_amount)}
                     </td>
                     <td className="py-3 px-3 text-center">
                       <button
@@ -388,7 +378,7 @@ export default function TaxHistoryPage() {
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 rounded-lg border border-emerald-200 transition cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5" />
-                        <span>Xem</span>
+                        <span>Xem 4 bước</span>
                       </button>
                     </td>
                   </tr>
@@ -399,16 +389,14 @@ export default function TaxHistoryPage() {
         )}
       </div>
 
-      {/* ========================================================== */}
-      {/* MODAL GIẢI TRÌNH BẬC TÍNH */}
-      {/* ========================================================== */}
+      {/* Modal Giải trình 4 bước */}
       {selectedDetailItem && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-xl max-h-[90vh] flex flex-col overflow-hidden animate-scaleIn">
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
               <div>
                 <h3 className="text-base font-bold text-slate-800">
-                  Giải Trình Bậc Tính Thuế TNCN
+                  Giải Trình 4 Bước Tính Thuế TNCN (Luật 109/2025/QH15)
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Nhân viên: <strong className="text-slate-800">{selectedDetailItem.full_name}</strong> ({selectedDetailItem.employee_code}) &bull; Kỳ {currentPeriod?.period}
@@ -416,57 +404,65 @@ export default function TaxHistoryPage() {
               </div>
               <button
                 onClick={() => setSelectedDetailItem(null)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-6 space-y-4 overflow-y-auto flex-1 text-xs sm:text-sm">
-              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-slate-600">1. Tổng thu nhập:</span>
-                  <span className="font-semibold text-slate-800">{formatCurrency(selectedDetailItem.total_income)}</span>
+              <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
+                <div>
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">1</span>
+                    Xác định Thu nhập chịu thuế (TNCT):
+                  </p>
+                  <p className="text-slate-600 text-xs mt-1 ml-6">
+                    = Tổng thu nhập ({formatCurrencyVND(selectedDetailItem.total_income)}) - Thu nhập không chịu thuế ({formatCurrencyVND(selectedDetailItem.non_taxable_income)})
+                  </p>
+                  <p className="font-bold text-slate-900 ml-6 mt-0.5">
+                    &rarr; TNCT = {formatCurrencyVND(selectedDetailItem.taxable_income)}
+                  </p>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">2. Thu nhập không chịu thuế:</span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.non_taxable_income)}</span>
+
+                <div className="border-t border-slate-200 pt-2.5">
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">2</span>
+                    Xác định Tổng các khoản giảm trừ:
+                  </p>
+                  <div className="text-slate-600 text-xs space-y-0.5 ml-6 mt-1">
+                    <p>&bull; Bảo hiểm bắt buộc: {formatCurrencyVND(selectedDetailItem.insurance)}</p>
+                    <p>&bull; Giảm trừ bản thân: {formatCurrencyVND(selectedDetailItem.personal_deduction)}</p>
+                    <p>&bull; Giảm trừ người phụ thuộc ({selectedDetailItem.dependent_count} người): {formatCurrencyVND(selectedDetailItem.dependent_deduction)}</p>
+                  </div>
+                  <p className="font-bold text-slate-900 ml-6 mt-0.5">
+                    &rarr; Tổng giảm trừ = {formatCurrencyVND(Number(selectedDetailItem.insurance) + Number(selectedDetailItem.personal_deduction) + Number(selectedDetailItem.dependent_deduction))}
+                  </p>
                 </div>
-                <div className="flex justify-between border-t border-slate-200 pt-1.5">
-                  <span className="text-slate-700 font-medium">&rArr; Thu nhập chịu thuế:</span>
-                  <span className="font-bold text-slate-900">{formatCurrency(selectedDetailItem.taxable_income)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">3. Giảm trừ bản thân:</span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.personal_deduction)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">
-                    4. Giảm trừ NPT ({selectedDetailItem.dependent_count} người):
-                  </span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.dependent_deduction)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">5. Bảo hiểm bắt buộc:</span>
-                  <span className="font-semibold text-slate-800">- {formatCurrency(selectedDetailItem.insurance)}</span>
-                </div>
-                <div className="flex justify-between border-t-2 border-emerald-600 pt-2 text-emerald-900 font-bold">
-                  <span>&rArr; Thu nhập tính thuế (TNTT):</span>
-                  <span className="text-base">{formatCurrency(selectedDetailItem.assessable_income)}</span>
+
+                <div className="border-t border-slate-200 pt-2.5">
+                  <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">3</span>
+                    Xác định Thu nhập tính thuế (TNTT):
+                  </p>
+                  <p className="font-bold text-emerald-800 ml-6 mt-0.5 text-sm">
+                    &rarr; TNTT = {formatCurrencyVND(selectedDetailItem.assessable_income)}
+                  </p>
                 </div>
               </div>
 
               {/* Chi tiết từng bậc */}
               <div>
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-                  Phân rã biểu lũy tiến từng phần
-                </h4>
+                <p className="font-bold text-slate-800 flex items-center gap-1.5 mb-2">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">4</span>
+                  Chi tiết Biểu thuế 5 bậc (Luật 109/2025/QH15):
+                </p>
                 <div className="border border-slate-200 rounded-xl overflow-hidden">
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-100 text-slate-700">
                       <tr>
                         <th className="py-2 px-3">Bậc</th>
-                        <th className="py-2 px-3">Thuế suất</th>
+                        <th className="py-2 px-3 text-center">Thuế suất</th>
                         <th className="py-2 px-3 text-right">Phần TNTT</th>
                         <th className="py-2 px-3 text-right">Tiền thuế</th>
                       </tr>
@@ -478,23 +474,23 @@ export default function TaxHistoryPage() {
                           className={b.taxAmount > 0 ? 'bg-emerald-50/50 font-medium' : 'text-slate-400'}
                         >
                           <td className="py-2 px-3 font-semibold">Bậc {b.bracket}</td>
-                          <td className="py-2 px-3">{Math.round(b.rate * 100)}%</td>
+                          <td className="py-2 px-3 text-center">{Math.round(b.rate * 100)}%</td>
                           <td className="py-2 px-3 text-right font-mono">
-                            {formatCurrency(b.taxablePortion)}
+                            {formatCurrencyVND(b.taxablePortion)}
                           </td>
                           <td className="py-2 px-3 text-right font-mono font-bold text-emerald-700">
-                            {formatCurrency(b.taxAmount)}
+                            {formatCurrencyVND(b.taxAmount)}
                           </td>
                         </tr>
                       ))}
                     </tbody>
-                    <tfoot className="bg-emerald-100/60 font-bold text-emerald-950 border-t border-emerald-200">
+                    <tfoot className="bg-emerald-100/70 font-bold text-emerald-950 border-t border-emerald-300">
                       <tr>
-                        <td colSpan={3} className="py-2 px-3">
-                          TỔNG THUẾ TNCN PHẢI NỘP:
+                        <td colSpan={3} className="py-2.5 px-3">
+                          THUẾ PHẢI NỘP (LÀM TRÒN XUỐNG NGHÌN):
                         </td>
-                        <td className="py-2 px-3 text-right font-mono text-sm text-emerald-800">
-                          {formatCurrency(selectedDetailItem.pit_amount)}
+                        <td className="py-2.5 px-3 text-right font-mono text-sm text-emerald-800">
+                          {formatCurrencyVND(selectedDetailItem.pit_amount)}
                         </td>
                       </tr>
                     </tfoot>
@@ -509,16 +505,14 @@ export default function TaxHistoryPage() {
                 onClick={() => setSelectedDetailItem(null)}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer"
               >
-                Đóng giải trình
+                Đóng
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL XÁC NHẬN XÓA KỲ THUẾ */}
-      {/* ========================================================== */}
+      {/* Modal Xác nhận Xóa kỳ thuế */}
       {confirmDeletePeriod && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md p-6">
@@ -532,15 +526,12 @@ export default function TaxHistoryPage() {
               Bạn có chắc chắn muốn xóa toàn bộ dữ liệu tính thuế của kỳ{' '}
               <strong className="text-slate-900">{confirmDeletePeriod.period}</strong>?
             </p>
-            <p className="text-xs text-rose-600 mt-2 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
-              Hành động này sẽ xóa vĩnh viễn bảng thuế tháng này trong cơ sở dữ liệu.
-            </p>
 
             <div className="mt-6 flex items-center justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setConfirmDeletePeriod(null)}
-                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
                 Hủy
               </button>
@@ -560,4 +551,3 @@ export default function TaxHistoryPage() {
     </div>
   );
 }
-
