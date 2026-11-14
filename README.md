@@ -10,9 +10,10 @@
 |---|---|
 | 👥 **Quản lý nhân viên** | CRUD nhân viên, xóa mềm (soft delete), import Excel (`.xlsx`) tự động cập nhật ghi đè (Upsert) khi trùng mã, kiểm tra trùng lặp trong file |
 | 👨‍👩‍👧 **Người phụ thuộc** | Đăng ký người phụ thuộc, bắt buộc đủ 2 mốc thời gian Từ tháng/năm đến Đến tháng/năm, danh mục quan hệ chuẩn, checkbox Không còn sử dụng |
-| 🧮 **Tính thuế tháng** | Import bảng thu nhập tháng từ Excel (cột `KhongChiuThue`), kiểm tra mã NV bắt buộc, tính tự động 4 bước minh bạch, tự động ghi đè kỳ cũ |
+| 🧮 **Tính thuế tháng** | Xử lý hoàn toàn phía Server (Server Action), tự động tra soát NPT từ CSDL, kiểm tra mã NV bắt buộc, tính tự động 4 bước minh bạch, ghi đè kỳ cũ trong transaction an toàn |
+| 🛡️ **Kiểm toán & Toàn vẹn dữ liệu** | Tự động tính mã băm SHA-256 của file Excel nguồn lưu vào `tax_periods` để đối soát; khóa hoàn toàn quyền ghi trực tiếp qua REST API |
 | 📊 **Lịch sử đóng thuế** | Tra cứu các kỳ đã lưu, tìm kiếm nhân viên trong bảng tháng, xuất báo cáo Excel định dạng VND có phân cách hàng nghìn |
-| 🔐 **Bảo mật & Phân quyền** | Đăng nhập an toàn qua Supabase Auth, tắt đăng ký công khai (tài khoản kế toán cấp thủ công trong Dashboard), bảo vệ 2 lớp |
+| 🔐 **Bảo mật & Phân quyền** | Đăng nhập an toàn qua Supabase Auth, tắt đăng ký công khai, RPC bọc `SECURITY DEFINER` với `search_path` an toàn và chỉ cấp quyền gọi cho `service_role` |
 
 ---
 
@@ -37,9 +38,10 @@
 
 ## 🛠️ Công Nghệ Sử Dụng
 
-- **Next.js 14** (App Router) — React Framework
-- **TypeScript** — Định kiểu tĩnh chặt chẽ
+- **Next.js 14** (App Router, Server Actions) — React Framework
+- **TypeScript** — Định kiểu tĩnh chặt chẽ, Single Source of Truth (SSOT) cho logic thuế
 - **Supabase** — Cơ sở dữ liệu PostgreSQL + Auth + Row Level Security (RLS)
+- **Vitest** — Khung kiểm thử tự động tốc độ cao (Unit Test & Security Test)
 - **Tailwind CSS** — Giao diện responsive, sạch sẽ, hiện đại
 - **Lucide React** — Icon trực quan
 - **SheetJS (xlsx)** — Đọc & xuất file Excel chuyên dụng
@@ -59,13 +61,18 @@ Nội dung `.env.local`:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+
+# Khóa bí mật máy chủ (chỉ dùng phía Server trong Server Action, tuyệt đối không lộ ra client)
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
 
 ### 2. Thiết lập CSDL và Tài khoản Kế toán trên Supabase
 1. **Chạy Migration SQL**:
-   Mở **SQL Editor** trên Supabase Dashboard và chạy nội dung file `supabase/schema.sql` (hoặc `supabase/migrations/20261114_add_is_deleted_and_rpc.sql`).
-2. **Tắt Đăng ký người dùng**:
-   Vào **Authentication** → **Providers** → **Email** → chuyển **"Allow new users to sign up"** thành **OFF** → bấm **Save**.
+   Mở **SQL Editor** trên Supabase Dashboard và chạy nội dung file:
+   - `supabase/schema.sql` (hoặc chạy tuần tự migration trong `supabase/migrations/`)
+   - Đặc biệt áp dụng `supabase/migrations/20261114_secure_tax_rpc_and_rls.sql` để thiết lập RLS khóa ghi và bảo vệ RPC.
+2. **Tắt Đăng ký người dùng tự do**:
+   Vào **Authentication** → **Sign In / Up** → chuyển **"Allow new users to sign up"** thành **OFF** → bấm **Save**.
 3. **Tạo tài khoản Kế toán**:
    Vào **Authentication** → **Users** → bấm **Add user** → chọn **Create user** → điền Email và Mật khẩu kế toán.
 
@@ -75,9 +82,8 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 # Cài đặt thư viện
 npm install
 
-# Chạy kiểm thử tự động xác minh biểu thuế 5 bậc
+# Chạy bộ kiểm thử tự động (11 tests xác minh logic 5 bậc và bảo mật Server Action)
 npm test
-# hoặc: node scripts/run-tests.js
 
 # Khởi động máy chủ phát triển
 npm run dev
@@ -96,30 +102,34 @@ VN_PIT/
 │   │   └── tax-rules.ts          # Nguồn cấu hình tham số thuế DUY NHẤT (15.5tr, 6.2tr, 5 bậc)
 │   ├── app/
 │   │   ├── (auth)/
-│   │   │   ├── login/page.tsx    # Trang đăng nhập duy nhất
-│   │   │   └── register/page.tsx # Chuyển hướng về /login (đã tắt đăng ký)
+│   │   │   └── login/page.tsx    # Trang đăng nhập duy nhất (đã xóa bỏ trang đăng ký)
 │   │   ├── (dashboard)/
 │   │   │   ├── layout.tsx        # Layout dashboard & kiểm tra session
 │   │   │   ├── page.tsx          # Tổng quan & bảng tra cứu 5 bậc
 │   │   │   ├── nhan-vien/        # CRUD nhân viên, xóa mềm, import Excel upsert
 │   │   │   ├── nguoi-phu-thuoc/  # Quản lý người phụ thuộc (2 mốc thời gian)
-│   │   │   ├── tinh-thue/        # Tính thuế tháng (4 bước, cột KhongChiuThue, ghi đè kỳ cũ)
+│   │   │   ├── tinh-thue/
+│   │   │   │   ├── page.tsx      # Giao diện tính thuế tháng & bảng xem trước
+│   │   │   │   └── actions.ts    # Server Action: đọc file, hash SHA-256, tra NPT & lưu DB
 │   │   │   └── lich-su-thue/     # Lịch sử thuế, tìm kiếm, xuất Excel VND
 │   │   ├── layout.tsx
 │   │   └── globals.css
 │   ├── components/layout/        # Navbar, Drawer responsive
 │   ├── lib/
+│   │   ├── __tests__/            # Bộ test Vitest (tax-calculator.test.ts, server-actions.test.ts)
 │   │   ├── tax-calculator.ts     # Engine tính toán thuế theo tax-rules
-│   │   ├── excel-utils.ts        # Đọc/xuất Excel kiểm tra lỗi
-│   │   └── supabase/             # Supabase client, server, middleware
+│   │   ├── excel-utils.ts        # Đọc/xuất Excel (chuẩn cột KhongChiuThue)
+│   │   └── supabase/
+│   │       ├── client.ts         # Supabase client cho trình duyệt
+│   │       ├── server.ts         # Supabase client cho Server Actions (cookie SSR)
+│   │       ├── service-role.ts   # Supabase client cho Service Role Key (bảo mật server)
+│   │       └── middleware.ts     # Middleware bảo vệ route
 │   ├── middleware.ts             # Chuyển hướng người chưa đăng nhập về /login
 │   └── types/database.ts         # TypeScript interfaces
 ├── supabase/
 │   ├── schema.sql                # Schema CSDL hoàn chỉnh
-│   └── migrations/               # Các migration lịch sử
-├── scripts/
-│   ├── run-tests.js              # Runner kiểm thử tự động 18 test cases
-│   └── test-all-cases.ts
+│   └── migrations/               # Các migration lịch sử (bao gồm RLS khóa ghi & hardened RPC)
+├── vitest.config.mjs             # Cấu hình test runner Vitest
 ├── .env.example
 ├── .gitignore
 ├── package.json
