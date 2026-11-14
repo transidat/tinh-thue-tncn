@@ -209,9 +209,17 @@ export async function parseEmployeeExcel(file: File): Promise<ParseExcelResult<E
  * - Kiểm tra số tiền: chữ, số âm, để trống
  * - Kiểm tra KhongChiuThue > TongThuNhap
  */
-export async function parseIncomeExcel(file: File): Promise<ParseExcelResult<IncomeImportRow>> {
-  const buffer = await file.arrayBuffer();
-  const wb = XLSX.read(buffer, { type: 'array' });
+export async function parseIncomeExcel(
+  fileOrBuffer: File | ArrayBuffer | Buffer
+): Promise<ParseExcelResult<IncomeImportRow>> {
+  let buffer: ArrayBuffer | Buffer;
+  if (typeof (fileOrBuffer as any).arrayBuffer === 'function') {
+    buffer = await (fileOrBuffer as File).arrayBuffer();
+  } else {
+    buffer = fileOrBuffer as ArrayBuffer | Buffer;
+  }
+
+  const wb = XLSX.read(buffer, { type: Buffer.isBuffer(buffer) ? 'buffer' : 'array' });
   const firstSheetName = wb.SheetNames[0];
   const worksheet = wb.Sheets[firstSheetName];
   const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(worksheet, { defval: null });
@@ -239,9 +247,7 @@ export async function parseIncomeExcel(file: File): Promise<ParseExcelResult<Inc
     const rawKhgCT =
       row['KhongChiuThue'] ??
       row['Không chịu thuế'] ??
-      row['KhgChiuThue'] ??
       row['khongchiuthue'] ??
-      row['khgchiuthue'] ??
       0;
     const rawBH = row['BaoHiem'] ?? row['Bảo hiểm'] ?? row['baohiem'] ?? 0;
 

@@ -31,6 +31,8 @@ export interface TaxPeriod {
   id: string;
   period: string; // 'YYYY-MM'
   notes: string | null;
+  source_file_name?: string | null;
+  source_file_sha256?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +58,7 @@ export interface PayrollItem {
   dependent_count: number;
   personal_deduction: number;
   dependent_deduction: number;
+  total_deductions?: number;
   taxable_income: number;
   assessable_income: number;
   pit_amount: number;

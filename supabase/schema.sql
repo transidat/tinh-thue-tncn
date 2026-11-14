@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS public.tax_periods (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     period TEXT NOT NULL UNIQUE, -- 'YYYY-MM' (ví dụ: '2026-01')
     notes TEXT,
+    source_file_name TEXT,
+    source_file_sha256 TEXT,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS public.payroll_items (
     dependent_count INTEGER DEFAULT 0 NOT NULL,             -- Số người phụ thuộc hợp lệ
     personal_deduction NUMERIC(15, 2) DEFAULT 15500000 NOT NULL, -- Giảm trừ bản thân (15.5tr Luật 2025)
     dependent_deduction NUMERIC(15, 2) DEFAULT 0 NOT NULL,  -- Giảm trừ NPT (dependent_count * 6.2tr)
+    total_deductions NUMERIC(15, 2) DEFAULT 0 NOT NULL,     -- Tổng giảm trừ (bảo hiểm + bản thân + NPT)
     taxable_income NUMERIC(15, 2) DEFAULT 0 NOT NULL,       -- Thu nhập chịu thuế = total_income - non_taxable_income
     assessable_income NUMERIC(15, 2) DEFAULT 0 NOT NULL,    -- Thu nhập tính thuế = max(0, taxable_income - các khoản giảm trừ)
     pit_amount NUMERIC(15, 2) DEFAULT 0 NOT NULL,           -- Thuế TNCN phải nộp (sau khi làm tròn xuống nghìn)
@@ -92,44 +95,52 @@ DROP POLICY IF EXISTS "Authenticated full access on dependents" ON public.depend
 CREATE POLICY "Authenticated full access on dependents"
     ON public.dependents FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
+-- Khóa quyền ghi qua PostgREST REST API trên tax_periods và payroll_items
 DROP POLICY IF EXISTS "Authenticated full access on tax_periods" ON public.tax_periods;
-CREATE POLICY "Authenticated full access on tax_periods"
-    ON public.tax_periods FOR ALL TO authenticated USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow authenticated read-only tax_periods" ON public.tax_periods;
+CREATE POLICY "Allow authenticated read-only tax_periods"
+    ON public.tax_periods FOR SELECT TO authenticated USING (true);
 
 DROP POLICY IF EXISTS "Authenticated full access on payroll_items" ON public.payroll_items;
-CREATE POLICY "Authenticated full access on payroll_items"
-    ON public.payroll_items FOR ALL TO authenticated USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow authenticated read-only payroll_items" ON public.payroll_items;
+CREATE POLICY "Allow authenticated read-only payroll_items"
+    ON public.payroll_items FOR SELECT TO authenticated USING (true);
 
--- 6. HÀM RPC LƯU KỲ TÍNH THUẾ TRONG TRANSACTION AN TOÀN
+-- Thu hồi quyền ghi ở tầng bảng
+REVOKE INSERT, UPDATE, DELETE ON public.payroll_items FROM anon, authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.tax_periods FROM anon, authenticated;
+
+-- 6. HÀM RPC LƯU KỲ TÍNH THUẾ TRONG TRANSACTION AN TOÀN (CHỈ DÀNH CHO SERVICE ROLE)
 CREATE OR REPLACE FUNCTION public.save_monthly_tax_payroll(
     p_period TEXT,
     p_notes TEXT,
+    p_source_file_name TEXT,
+    p_source_file_sha256 TEXT,
     p_items JSONB
 )
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     v_period_id UUID;
     v_item JSONB;
     v_inserted_count INT := 0;
 BEGIN
-    -- Kiểm tra xác thực
-    IF auth.uid() IS NULL THEN
-        RAISE EXCEPTION 'Yêu cầu xác thực tài khoản kế toán.';
-    END IF;
-
     -- Lấy hoặc tạo mới tax_periods
     SELECT id INTO v_period_id FROM public.tax_periods WHERE period = p_period;
     
     IF v_period_id IS NULL THEN
-        INSERT INTO public.tax_periods (period, notes)
-        VALUES (p_period, p_notes)
+        INSERT INTO public.tax_periods (period, notes, source_file_name, source_file_sha256)
+        VALUES (p_period, p_notes, p_source_file_name, p_source_file_sha256)
         RETURNING id INTO v_period_id;
     ELSE
         UPDATE public.tax_periods
-        SET notes = p_notes, updated_at = timezone('utc'::text, now())
+        SET notes = p_notes,
+            source_file_name = p_source_file_name,
+            source_file_sha256 = p_source_file_sha256,
+            updated_at = timezone('utc'::text, now())
         WHERE id = v_period_id;
     END IF;
 
@@ -151,6 +162,7 @@ BEGIN
             dependent_count,
             personal_deduction,
             dependent_deduction,
+            total_deductions,
             taxable_income,
             assessable_income,
             pit_amount,
@@ -167,6 +179,7 @@ BEGIN
             COALESCE((v_item->>'dependent_count')::INT, 0),
             COALESCE((v_item->>'personal_deduction')::NUMERIC, 15500000),
             COALESCE((v_item->>'dependent_deduction')::NUMERIC, 0),
+            COALESCE((v_item->>'total_deductions')::NUMERIC, 0),
             COALESCE((v_item->>'taxable_income')::NUMERIC, 0),
             COALESCE((v_item->>'assessable_income')::NUMERIC, 0),
             COALESCE((v_item->>'pit_amount')::NUMERIC, 0),
@@ -179,7 +192,14 @@ BEGIN
         'success', true,
         'period_id', v_period_id,
         'period', p_period,
+        'source_file_name', p_source_file_name,
+        'source_file_sha256', p_source_file_sha256,
         'inserted_count', v_inserted_count
     );
 END;
 $$;
+
+-- Thu hồi quyền từ public/anon/authenticated và chỉ cấp cho service_role
+REVOKE EXECUTE ON FUNCTION public.save_monthly_tax_payroll(TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.save_monthly_tax_payroll(TEXT, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.save_monthly_tax_payroll(TEXT, TEXT, TEXT, TEXT, JSONB) TO service_role;

@@ -353,7 +353,7 @@ export default function DashboardPage() {
 
           <div className="mt-4 p-3.5 bg-emerald-50/60 rounded-xl border border-emerald-100 text-xs text-slate-600 space-y-1">
             <p>
-              <strong className="text-emerald-800 font-semibold">&bull; Mức giảm trừ gia cảnh mới:</strong> Bản thân 15.500.000 ₫/tháng; Mỗi người phụ thuộc 6.200.000 ₫/tháng.
+              <strong className="text-emerald-800 font-semibold">&bull; Mức giảm trừ gia cảnh mới:</strong> Bản thân {formatCurrencyVND(PERSONAL_DEDUCTION)}/tháng; Mỗi người phụ thuộc {formatCurrencyVND(DEPENDENT_DEDUCTION)}/tháng.
             </p>
             <p>
               <strong className="text-emerald-800 font-semibold">&bull; Làm tròn:</strong> Thuế tổng cộng được làm tròn xuống hàng nghìn theo đúng quy định.
